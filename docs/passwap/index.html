@@ -90,6 +90,7 @@
     <label for="makePass">passphrase for the claimer</label>
     <input id="makePass" placeholder="six or more random words; share these privately" autocomplete="off" spellcheck="false">
     <button class="ghost" id="genPass" style="margin-top:8px">generate six words</button>
+    <p class="sub" id="passNote" style="margin:8px 0 0"></p>
     <button class="primary" id="makeBtn" disabled>create offer</button>
     <details><summary>what happens when you create</summary>
       your tokens go into a vault owned by a 2-of-3 of {this program, you, the claim key}. whoever has the passphrase can claim at your rate; you can cancel here. if this program disappears, you and the claimer can still move the vault together. <a href="protocol.html#make" style="color:var(--accent)">details</a></details>
@@ -289,7 +290,7 @@
       if (amountA <= 0n) throw new Error("the amount you give must be positive (the price may be 0: a free offer)");
       const haveD = await tokenBalance(wallet, DREGG, TP22);
       if (haveD < MAKE_FEE) throw new Error(`posting an offer costs ${abi.fee.make.display}; this wallet holds ${fmt(haveD, abi.fee.make.decimals)} DREGG`);
-      if (pass.trim().split(/\s+/).length < 4) throw new Error("use at least four words; six generated ones is the recommendation");
+      if (!pass.trim()) throw new Error("enter a passphrase, or generate one");
       const seed = BigInt(Date.now());
       const nbRaw = $("notBefore").value; const notBefore = nbRaw ? BigInt(Math.floor(new Date(nbRaw).getTime() / 1000)) : 0n;
       const [offer] = pw.offerPda(wallet, seed);
@@ -324,7 +325,9 @@
     $("paneClaim").hidden = which !== "claim"; $("paneMake").hidden = which !== "make"; $("paneCancel").hidden = which !== "make";
   }
   $("connectBtn").onclick = () => connect().catch((e) => log("wallet: " + (e.message || e), "bad")); $("claimBtn").onclick = claim; $("makeBtn").onclick = make; $("cancelBtn").onclick = cancel;
-  $("genPass").onclick = () => { $("makePass").value = genPass(); };
+  $("genPass").onclick = () => { $("makePass").value = genPass(); passNote(); };
+  function passNote() { const n = $("makePass").value.trim().split(/\s+/).filter(Boolean).length; $("passNote").textContent = n && n < 4 ? "your call: a short passphrase can be guessed offline against the public claim key. fine for a gift or a quick trade; use the generator for anything valuable." : ""; }
+  $("makePass").addEventListener("input", passNote);
   $("takeAmount").addEventListener("input", quote);
   const mintOf = (id) => new PublicKey(($(id).dataset.mint || $(id).value).trim());
   async function makeQuote() {
