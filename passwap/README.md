@@ -41,4 +41,6 @@ node scripts/vectors-test.mjs            # localtest / pagetest / deploytest: se
 
 CI (`.github/workflows/passwap.yml`) verifies, builds, checks the generated ABI is committed, runs vectors and the validator suite, and says whether `docs/passwap/passwap.so` is its own build. After a source change: download the artifact of a green run and commit it.
 
-**Deploy**: `deploy.html` from a browser wallet. Paste the program keypair to keep the id. The wallet holds the upgrade authority and gets the rent back on close.
+**Mainnet**: `7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6`, deployed 2026-09-26, on-chain sha256 `2bf95baf10089416271684668f88d28ea3d7507c966b42955b1eda8c673c94cc` (CI's build of `7403a25`). Upgrade authority: the deployer wallet.
+
+**Deploy**: `deploy.html` from a browser wallet, or the CLI. Paste the program keypair to keep the id. The wallet holds the upgrade authority and gets the rent back on close.

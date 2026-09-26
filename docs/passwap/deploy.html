@@ -91,9 +91,11 @@
   // ---- wallet
   let wallet = null, chosen = null; const provider = () => chosen;
   async function connect(pick) {
-    const list = passwapWallets.list(web3);
-    if (!list.length) { log("no wallet found. install a Solana wallet (Talisman, Phantom, Solflare, Backpack) and reload.", "warn"); return; }
-    if (!pick && list.length > 1) { log("choose a wallet: " + list.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ")); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(list[+b.dataset.w]); }); return; }
+    log("looking for wallets…");
+    const list = await passwapWallets.list(web3);
+    if (!list.length) { const d = passwapWallets.debug(); log(`no wallet found. install a Solana wallet (Talisman, Phantom, Solflare, Backpack) and reload.<br><span class="dim">seen: standard [${d.standard.join(", ")}] legacy [${d.legacy.join(", ")}] globals [${d.globals.join(", ")}]</span>`, "warn"); return; }
+    if (!pick && list.length > 1) { log("choose a wallet: " + list.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ") + ` <button class="ghost" data-w="rescan">rescan</button>`); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(b.dataset.w === "rescan" ? undefined : list[+b.dataset.w]); }); return; }
+    if (!pick && q.get("pick") !== null) { log("found one wallet: " + `<button class="ghost" data-w="0">${list[0].name}</button> <button class="ghost" data-w="rescan">rescan</button>`); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(b.dataset.w === "rescan" ? undefined : list[0]); }); return; }
     const p = pick || list[0]; chosen = p;
     const r = await p.connect(); wallet = new PublicKey((r && r.publicKey ? r.publicKey : p.publicKey).toString());
     $("walletState").textContent = `connected via ${p.name}: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`; $("connectBtn").textContent = "connected"; log(""); refresh();
@@ -199,7 +201,7 @@
   }
   $("deployBtn").onclick = deploy; $("upgradeBtn").onclick = upgrade; $("closeBtn").onclick = closeProgram;
   await loadDefault(); refresh();
-  { const l = passwapWallets.list(web3); if (l.length === 1 && l[0].isConnected) await connect(l[0]).catch(() => {}); }
+  { const l = await passwapWallets.list(web3); if (l.length === 1 && l[0].isConnected) await connect(l[0]).catch(() => {}); }
 })();
 </script>
 </body>
