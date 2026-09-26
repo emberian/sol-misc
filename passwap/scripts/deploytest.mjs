@@ -30,14 +30,13 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
 page.on("console", (m) => { if (m.type() === "error") console.log("  [console.error]", m.text().slice(0, 200)); });
 await page.addInitScript((sk) => {
-  const wait = (f) => new Promise((r) => { const t = setInterval(() => { if (f()) { clearInterval(t); r(); } }, 20); });
-  window.solana = {
-    isConnected: false, publicKey: null,
-    async connect() { await wait(() => window.solanaWeb3); const kp = window.solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(sk)); this._kp = kp; this.publicKey = kp.publicKey; this.isConnected = true; return { publicKey: kp.publicKey }; },
-    async signTransaction(tx) { tx.partialSign(this._kp); return tx; },
-    async signAllTransactions(txs) { for (const tx of txs) tx.partialSign(this._kp); return txs; },
-  };
-}, Array.from(payer.secretKey));
+    // a Wallet Standard wallet backed by a local keypair, registered the way Talisman, Phantom and Solflare register
+    const wait = (f) => new Promise((r) => { const t = setInterval(() => { if (f()) { clearInterval(t); r(); } }, 20); });
+    const w = { version: "1.0.0", name: "TestWallet", icon: "data:image/svg+xml;base64,PHN2Zy8+", chains: ["solana:mainnet", "solana:localnet"], accounts: [], features: {} };
+    w.features["standard:connect"] = { version: "1.0.0", async connect() { await wait(() => window.solanaWeb3); const kp = window.solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(sk)); w._kp = kp; w.accounts = [{ address: kp.publicKey.toBase58(), publicKey: kp.publicKey.toBytes(), chains: w.chains, features: ["solana:signTransaction"] }]; return { accounts: w.accounts }; } };
+    w.features["solana:signTransaction"] = { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], async signTransaction(...inputs) { return inputs.map((i) => { const tx = window.solanaWeb3.Transaction.from(i.transaction); tx.partialSign(w._kp); return { signedTransaction: tx.serialize({ requireAllSignatures: false }) }; }); } };
+    window.addEventListener("wallet-standard:app-ready", (e) => e.detail.register(w));
+  }, Array.from(payer.secretKey));
 await page.goto(`http://127.0.0.1:8766/deploy.html?rpc=${encodeURIComponent(rpc)}`, { waitUntil: "domcontentloaded" });
 await page.waitForFunction(() => document.getElementById("binInfo").innerText.includes("sha256"), { timeout: 20000 });
 await page.click("#connectBtn"); await page.waitForFunction(() => document.getElementById("walletState").textContent.startsWith("connected"));

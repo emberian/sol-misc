@@ -101,6 +101,7 @@
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
 <script src="https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js"></script>
 <script src="passwap.js"></script>
+<script src="wallet.js"></script>
 <script>
 (async function () {
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
@@ -118,14 +119,16 @@
   const genPass = () => { const r = new Uint32Array(5); crypto.getRandomValues(r); return Array.from(r, (x) => WORDS[x % WORDS.length]).join(" "); };
 
   // ---- wallet (Phantom-style provider on window.solana, or an injected test provider)
-  let wallet = null;
-  const provider = () => window.solana || window.__passwapTestWallet;
-  async function connect() {
-    const p = provider();
-    if (!p) { log("no wallet found. install Phantom or another Solana wallet extension, then reload.", "warn"); return; }
+  let wallet = null, chosen = null;
+  const provider = () => chosen;
+  async function connect(pick) {
+    const list = passwapWallets.list(web3);
+    if (!list.length) { log("no wallet found. install a Solana wallet (Talisman, Phantom, Solflare, Backpack) and reload.", "warn"); return; }
+    if (!pick && list.length > 1) { log("choose a wallet: " + list.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ")); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(list[+b.dataset.w]); }); return; }
+    const p = pick || list[0]; chosen = p;
     const r = await p.connect();
     wallet = new PublicKey((r && r.publicKey) ? r.publicKey.toString() : p.publicKey.toString());
-    $("walletState").textContent = `connected: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`;
+    $("walletState").textContent = `connected via ${p.name}: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`;
     $("connectBtn").textContent = "connected";
     if (offerCache) { await computeOpens(); quote(); }
     if (!$("paneMake").hidden) makeQuote();
@@ -270,7 +273,7 @@
     $("tabClaim").setAttribute("aria-selected", which === "claim"); $("tabMake").setAttribute("aria-selected", which === "make");
     $("paneClaim").hidden = which !== "claim"; $("paneMake").hidden = which !== "make"; $("paneCancel").hidden = which !== "make";
   }
-  $("connectBtn").onclick = connect; $("claimBtn").onclick = claim; $("makeBtn").onclick = make; $("cancelBtn").onclick = cancel;
+  $("connectBtn").onclick = () => connect().catch((e) => log("wallet: " + (e.message || e), "bad")); $("claimBtn").onclick = claim; $("makeBtn").onclick = make; $("cancelBtn").onclick = cancel;
   $("genPass").onclick = () => { $("makePass").value = genPass(); };
   $("takeAmount").addEventListener("input", quote);
   async function makeQuote() {
@@ -299,7 +302,7 @@
   $("passphrase").addEventListener("input", refreshButtons);
   if (q.get("offer")) { $("offerAddr").value = q.get("offer"); await loadOffer(); }
   if (q.get("mode") === "make") showTab("make");
-  if (provider() && provider().isConnected) await connect().catch(() => {});
+  { const l = passwapWallets.list(web3); if (l.length === 1 && l[0].isConnected) await connect(l[0]).catch(() => {}); }
   window.__passwapReady = true;
 })();
 </script>

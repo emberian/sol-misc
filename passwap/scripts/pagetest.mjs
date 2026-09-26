@@ -29,13 +29,12 @@ async function pageWith(secretKey, url) {
   const page = await browser.newPage();
   page.on("console", (m) => { if (m.type() === "error") console.log("  [console.error]", m.text().slice(0, 200)); });
   await page.addInitScript((sk) => {
-    // a Phantom-shaped provider backed by tweetnacl once the page has loaded it
+    // a Wallet Standard wallet backed by a local keypair, registered the way Talisman, Phantom and Solflare register
     const wait = (f) => new Promise((r) => { const t = setInterval(() => { if (f()) { clearInterval(t); r(); } }, 20); });
-    window.__passwapTestWallet = {
-      isConnected: false, publicKey: null,
-      async connect() { await wait(() => window.solanaWeb3 && window.nacl); const kp = window.solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(sk)); this._kp = kp; this.publicKey = kp.publicKey; this.isConnected = true; return { publicKey: kp.publicKey }; },
-      async signTransaction(tx) { tx.partialSign(this._kp); return tx; },
-    };
+    const w = { version: "1.0.0", name: "TestWallet", icon: "data:image/svg+xml;base64,PHN2Zy8+", chains: ["solana:mainnet", "solana:localnet"], accounts: [], features: {} };
+    w.features["standard:connect"] = { version: "1.0.0", async connect() { await wait(() => window.solanaWeb3); const kp = window.solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(sk)); w._kp = kp; w.accounts = [{ address: kp.publicKey.toBase58(), publicKey: kp.publicKey.toBytes(), chains: w.chains, features: ["solana:signTransaction"] }]; return { accounts: w.accounts }; } };
+    w.features["solana:signTransaction"] = { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], async signTransaction(...inputs) { return inputs.map((i) => { const tx = window.solanaWeb3.Transaction.from(i.transaction); tx.partialSign(w._kp); return { signedTransaction: tx.serialize({ requireAllSignatures: false }) }; }); } };
+    window.addEventListener("wallet-standard:app-ready", (e) => e.detail.register(w));
   }, secretKey);
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__passwapReady, { timeout: 20000 });

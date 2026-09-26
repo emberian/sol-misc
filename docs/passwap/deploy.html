@@ -60,6 +60,7 @@
 </main>
 
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
+<script src="wallet.js"></script>
 <script>
 (async function () {
   const web3 = solanaWeb3, { PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY } = web3;
@@ -88,9 +89,16 @@
   $("progKey").addEventListener("input", refresh); $("progId").addEventListener("input", refresh); $("rpc").addEventListener("input", refresh);
 
   // ---- wallet
-  let wallet = null; const provider = () => window.solana;
-  async function connect() { const p = provider(); if (!p) { log("no wallet found. install Phantom or another Solana wallet that supports signAllTransactions.", "warn"); return; } const r = await p.connect(); wallet = new PublicKey((r && r.publicKey ? r.publicKey : p.publicKey).toString()); $("walletState").textContent = `connected: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`; $("connectBtn").textContent = "connected"; refresh(); }
-  $("connectBtn").onclick = connect;
+  let wallet = null, chosen = null; const provider = () => chosen;
+  async function connect(pick) {
+    const list = passwapWallets.list(web3);
+    if (!list.length) { log("no wallet found. install a Solana wallet (Talisman, Phantom, Solflare, Backpack) and reload.", "warn"); return; }
+    if (!pick && list.length > 1) { log("choose a wallet: " + list.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ")); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(list[+b.dataset.w]); }); return; }
+    const p = pick || list[0]; chosen = p;
+    const r = await p.connect(); wallet = new PublicKey((r && r.publicKey ? r.publicKey : p.publicKey).toString());
+    $("walletState").textContent = `connected via ${p.name}: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`; $("connectBtn").textContent = "connected"; log(""); refresh();
+  }
+  $("connectBtn").onclick = () => connect().catch((e) => log("wallet: " + (e.message || e), "bad"));
 
   const conn = () => new web3.Connection($("rpc").value.trim() || "https://api.mainnet-beta.solana.com", "confirmed");
   function refresh() {
@@ -191,7 +199,7 @@
   }
   $("deployBtn").onclick = deploy; $("upgradeBtn").onclick = upgrade; $("closeBtn").onclick = closeProgram;
   await loadDefault(); refresh();
-  if (provider() && provider().isConnected) await connect().catch(() => {});
+  { const l = passwapWallets.list(web3); if (l.length === 1 && l[0].isConnected) await connect(l[0]).catch(() => {}); }
 })();
 </script>
 </body>
