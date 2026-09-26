@@ -88,6 +88,17 @@ each transfer sum to zero.
   business. `abi.json` fixes the derivation (PBKDF2-SHA512, 600,000 rounds, salted with the offer
   address) so every client derives the same key.
 
+## Operating the program
+
+- **Closing while offers are open loses their vaults.** A closed program never runs again, and a
+  vault can only be moved by the offer PDA, which can only sign while the program executes. The
+  deploy page refuses to close while any 162-byte offer account exists under the program. Cancel or
+  take every offer first.
+- **Upgrade authority is the trust knob.** While a wallet holds it, that wallet can upgrade the
+  program to anything, including code that signs for every vault. For a public service the honest
+  configuration is to set the authority to none after deployment: the program becomes immutable,
+  and its rent (0.326 SOL for this binary) is parked permanently, since only the authority can close.
+
 ## Negative tests
 
 `scripts/localtest.mjs` runs these against a local validator; each must be refused.

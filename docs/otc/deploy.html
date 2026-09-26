@@ -171,7 +171,12 @@
   }
   async function closeProgram() {
     const pid = new PublicKey(progKp ? progKp.publicKey : $("progId").value.trim());
-    if (!confirm(`close ${pid.toBase58()} and return its rent to your wallet? a closed program address can never be reused.`)) return;
+    // A closed program can never run again, so any offer still open would lose its vault forever:
+    // the vault's authority is the offer PDA, and a PDA can only sign while its program executes.
+    log("checking for open offers…");
+    const open = await conn().getProgramAccounts(pid, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: 162 }] });
+    if (open.length) { log(`refusing to close: ${open.length} offer(s) still open. every one must be taken or cancelled first, or its tokens are lost forever:\n` + open.map((a) => a.pubkey.toBase58()).join("\n"), "bad"); return; }
+    if (!confirm(`close ${pid.toBase58()} and return its rent to your wallet? no offers are open. a closed program address can never be reused.`)) return;
     // the loader refuses a close in the same slot as a deploy or upgrade; wait a few slots if we just did one
     if (lastActionSlot !== null) { const c0 = conn(); while ((await c0.getSlot("confirmed")) < lastActionSlot + 3) await new Promise((r) => setTimeout(r, 400)); }
     $("closeBtn").disabled = true;
