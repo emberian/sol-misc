@@ -50,7 +50,9 @@
   <ul>
     <li>never on chain. the chain sees a public key and a signature.</li>
     <li>salted with the offer address: same words, different key per offer.</li>
-    <li>five random words, shared privately. lost? maker cancels and re-offers.</li>
+    <li>the claim key is public, so guessing is offline against it: about 10,000 guesses per second per GPU at these rounds.</li>
+    <li>the generator gives six words from the 2,048-word BIP39 list: 2<sup>66</sup>, millions of GPU-years. five words from a 250-word list would be 2<sup>40</sup>, about three GPU-years. use the generator.</li>
+    <li>shared privately. whoever has the words first can claim. lost? the maker cancels and re-offers.</li>
     <li><b>export claim keypair</b> on the claim page: your key as a file, for <a href="#recovery">recovery</a>.</li>
   </ul>
 

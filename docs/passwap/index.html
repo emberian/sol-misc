@@ -88,8 +88,8 @@
     <label for="notBefore">no cancel before (optional)</label>
     <input id="notBefore" type="datetime-local" placeholder="leave empty to allow cancelling any time">
     <label for="makePass">passphrase for the claimer</label>
-    <input id="makePass" placeholder="five or more words; share these privately" autocomplete="off" spellcheck="false">
-    <button class="ghost" id="genPass" style="margin-top:8px">generate five words</button>
+    <input id="makePass" placeholder="six or more random words; share these privately" autocomplete="off" spellcheck="false">
+    <button class="ghost" id="genPass" style="margin-top:8px">generate six words</button>
     <button class="primary" id="makeBtn" disabled>create offer</button>
     <details><summary>what happens when you create</summary>
       your tokens go into a vault owned by a 2-of-3 of {this program, you, the claim key}. whoever has the passphrase can claim at your rate; you can cancel here. if this program disappears, you and the claimer can still move the vault together. <a href="protocol.html#make" style="color:var(--accent)">details</a></details>
@@ -110,6 +110,7 @@
 <script src="passwap.js"></script>
 <script src="wallet.js"></script>
 <script src="tokens.js"></script>
+<script src="bip39.js"></script>
 <script>
 (async function () {
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
@@ -127,8 +128,9 @@
   document.getElementById("rpcName").onclick = (e) => { e.preventDefault(); const v = prompt("rpc url for this browser (empty to go back to the default)", storedRpc || ""); if (v === null) return; try { v.trim() ? localStorage.setItem("passwap.rpc", v.trim()) : localStorage.removeItem("passwap.rpc"); } catch {} location.reload(); };
   const $ = (id) => document.getElementById(id);
   const log = (msg, cls = "") => { const el = $("log"); el.innerHTML = `<span class="${cls}">${msg}</span>`; };
-  const WORDS = "acorn amber anvil apron arrow aspen atlas badge baker basil beach beacon birch bison blaze bloom board bramble brass bread bridge brook cabin candle canyon cedar chalk cherry cider cinder clover cobalt comet copper coral cove crane crest crown dawn delta dune eagle ember falcon feather fennel fern finch fjord flint forge fossil frost garnet ginger glade goose grain granite grove harbor hazel heron hollow honey ibis indigo iris ivory jade jasper juniper kelp kestrel kiln lagoon lantern larch lark lava lilac linen lotus lumen maple marble meadow mint moss mulberry myrrh nectar nettle north oak oasis ocean olive onyx orbit orchid otter oyster paddle parcel pebble pepper petal pine plume poppy prairie quail quartz quill quiet raven reed ridge river robin rowan ruby rune saffron sage salt sand sedge shell silver slate smoke snow sorrel spruce stone summit sundial tansy teal thistle thorn tide timber topaz torch trout tulip tundra umber valley velvet violet walnut water willow wren yarrow zephyr".split(" ");
-  const genPass = () => { const r = new Uint32Array(5); crypto.getRandomValues(r); return Array.from(r, (x) => WORDS[x % WORDS.length]).join(" "); };
+  // six words from the 2048-word BIP39 list: 2^66 possibilities. the claim key is public, so guessing is offline;
+  // at ~10k PBKDF2 guesses/s per GPU that is millions of GPU-years. rejection-sampled so every word is equally likely.
+  const genPass = () => { const out = []; while (out.length < 6) { const r = new Uint32Array(1); crypto.getRandomValues(r); if (r[0] < 4294965248) out.push(passwapWords[r[0] % 2048]); } return out.join(" "); };
 
   // ---- wallet (Phantom-style provider on window.solana, or an injected test provider)
   let wallet = null, chosen = null;
@@ -284,7 +286,7 @@
       const amountA = toBase($("amountA").value, decA), amountB = toBase($("amountB").value, decB);
       const pass = $("makePass").value;
       if (amountA <= 0n || amountB <= 0n) throw new Error("amounts must be positive");
-      if (pass.trim().split(/\s+/).length < 4) throw new Error("use at least four words");
+      if (pass.trim().split(/\s+/).length < 4) throw new Error("use at least four words; six generated ones is the recommendation");
       const seed = BigInt(Date.now());
       const nbRaw = $("notBefore").value; const notBefore = nbRaw ? BigInt(Math.floor(new Date(nbRaw).getTime() / 1000)) : 0n;
       const [offer] = pw.offerPda(wallet, seed);
