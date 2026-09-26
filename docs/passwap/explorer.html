@@ -47,6 +47,7 @@
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
 <script src="https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js"></script>
 <script src="passwap.js"></script>
+<script src="tokens.js"></script>
 <script>
 (async function () {
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
@@ -58,6 +59,7 @@
   const conn = new web3.Connection(RPC, "confirmed");
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const pw = makePasswap(web3, nacl, PROGRAM_ID, abi);
+  const tokens = passwapTokens(web3, conn);
   const $ = (id) => document.getElementById(id);
   const log = (m, cls = "") => { $("log").innerHTML = `<span class="${cls}">${m}</span>`; };
   $("programId").textContent = PROGRAM_ID; $("rpcName").textContent = new URL(RPC).host + (storedRpc && !q.get("rpc") ? " (yours)" : "");
@@ -85,16 +87,24 @@
     }
   }
   const dec = (mint) => decimals.get(mint.toString()) ?? 0;
-  const amt = (a, mint) => `${fmt(a, dec(mint))} ${short(mint)}`;
+  const amt = (a, mint) => `${fmt(a, dec(mint))} <span title="${mint.toString()}">${esc(tokens.sym(mint.toString()))}</span>`;
+  const symbolsFor = (mints) => Promise.all([...new Set(mints.map((m) => m.toString()))].map((m) => tokens.resolve(m).catch(() => null)));
 
-  // ---- open offers: every account of the offer record's size under the program
+  // ---- open offers: every offer address seen in the program's history (plus getProgramAccounts where the RPC allows it),
+  // read back in batches; the ones that still exist at the record's size are open
+  const seenOffers = new Set();
   async function loadOffers() {
-    const accts = await conn.getProgramAccounts(new PublicKey(PROGRAM_ID), { filters: [{ dataSize: abi.offer.len }] });
-    const offers = []; for (const a of accts) { try { offers.push({ addr: a.pubkey, o: pw.readOffer(a.account.data) }); } catch {} }
+    const addrs = new Set(seenOffers);
+    try { for (const a of await conn.getProgramAccounts(new PublicKey(PROGRAM_ID), { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: abi.offer.len }] })) addrs.add(a.pubkey.toBase58()); } catch {}
+    const list = [...addrs].map((a) => new PublicKey(a)); const offers = [];
+    for (let i = 0; i < list.length; i += 100) {
+      const infos = await conn.getMultipleAccountsInfo(list.slice(i, i + 100));
+      infos.forEach((info, j) => { if (info && info.data.length === abi.offer.len) { try { offers.push({ addr: list[i + j], o: pw.readOffer(info.data) }); } catch {} } });
+    }
     await loadDecimals(offers.flatMap(({ o }) => [o.mintA, o.mintB]));
-    // vault balances in one call; a missing vault means the parties recovered it without the program
+    await symbolsFor(offers.flatMap(({ o }) => [o.mintA, o.mintB]));
     const tp = new Map(); for (const { o } of offers) if (!tp.has(o.mintA.toString())) tp.set(o.mintA.toString(), null);
-    const mintInfos = await conn.getMultipleAccountsInfo([...tp.keys()].map((m) => new PublicKey(m)));
+    const mintInfos = tp.size ? await conn.getMultipleAccountsInfo([...tp.keys()].map((m) => new PublicKey(m))) : [];
     [...tp.keys()].forEach((m, i) => tp.set(m, mintInfos[i] ? mintInfos[i].owner : pw.P.token));
     const vaults = offers.map(({ o }) => pw.ata(o.vaultAuth, o.mintA, tp.get(o.mintA.toString())));
     const vinfos = vaults.length ? await conn.getMultipleAccountsInfo(vaults) : [];
@@ -105,7 +115,7 @@
       const v = vinfos[i]; const avail = v ? readU64(v.data, 64) : null; if (avail !== null && avail > 0n) open++;
       const status = avail === null ? `<span class="dim">vault closed by the parties</span>` : `${fmt(avail, dec(o.mintA))}${avail < o.amountA ? ` <span class="dim">of ${fmt(o.amountA, dec(o.mintA))}</span>` : ""}`;
       const nb = o.notBefore > 0n ? new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time";
-      tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${fmt(o.amountB, dec(o.mintB))} / ${fmt(o.amountA, dec(o.mintA))} ${short(o.mintB)}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
+      tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${fmt(o.amountB, dec(o.mintB))} ${esc(tokens.sym(o.mintB.toString()))} / ${fmt(o.amountA, dec(o.mintA))} ${esc(tokens.sym(o.mintA.toString()))}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
     });
     if (!offers.length) tbl.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="dim">no open offers</td></tr>`);
     $("sOpen").textContent = open;
@@ -128,6 +138,7 @@
       const args = decodeArgs(abi.instructions[name].args, data.slice(1));
       const acc = (n) => ix.accounts[idx(name, n)];
       const item = { sig: sigs[i].signature, time: sigs[i].blockTime, name, ok: !sigs[i].err, offer: acc("offer"), args };
+      if (item.offer) seenOffers.add(item.offer.toString());
       if (name === "make") Object.assign(item, { who: acc("maker"), mintA: acc("mint_a"), mintB: args.mint_b });
       if (name === "take") Object.assign(item, { who: acc("payer"), mintA: acc("mint_a"), mintB: acc("mint_b") });
       if (name === "cancel") Object.assign(item, { who: acc("maker"), mintA: acc("mint_a") });
@@ -139,6 +150,7 @@
       items.push(item);
     });
     await loadDecimals(items.flatMap((it) => [it.mintA, it.mintB].filter(Boolean)).concat([...fees.keys()].map((m) => new PublicKey(m))));
+    await symbolsFor(items.flatMap((it) => [it.mintA, it.mintB].filter(Boolean)).concat([...fees.keys()].map((m) => new PublicKey(m))));
     const tbl = $("activity");
     for (const it of items) {
       const when = it.time ? new Date(it.time * 1000).toLocaleString() : "";
@@ -150,14 +162,14 @@
     }
     $("sMakes").textContent = counts.make; $("sTakes").textContent = counts.take; $("sCancels").textContent = counts.cancel;
     $("sWindow").textContent = `(last ${rows} txs)`;
-    $("sFees").innerHTML = fees.size ? [...fees].map(([m, d]) => `${fmt(d, dec(new PublicKey(m)))} ${short(new PublicKey(m))}`).join("<br>") : "0";
+    $("sFees").innerHTML = fees.size ? [...fees].map(([m, d]) => `${fmt(d, dec(new PublicKey(m)))} ${esc(tokens.sym(m))}`).join("<br>") : "0";
     if (sigs.length < PAGE) $("more").disabled = true;
   }
   async function refresh() {
     $("more").disabled = false; log("loading…");
-    try { await loadOffers(); await loadActivity(true); log(""); } catch (e) { log("rpc error: " + (e.message || e) + (q.get("rpc") ? "" : ". the public rpc rate-limits; try again or pass ?rpc="), "bad"); }
+    try { await loadActivity(true); await loadOffers(); log(""); } catch (e) { log("rpc error: " + (e.message || e) + (q.get("rpc") ? "" : ". the public rpc rate-limits; try again or pass ?rpc="), "bad"); }
   }
-  $("refresh").onclick = refresh; $("more").onclick = () => loadActivity(false).catch((e) => log("rpc error: " + (e.message || e), "bad"));
+  $("refresh").onclick = refresh; $("more").onclick = () => loadActivity(false).then(loadOffers).catch((e) => log("rpc error: " + (e.message || e), "bad"));
   await refresh();
   window.__explorerReady = true;
 })();

@@ -19,14 +19,16 @@
       { mint: "So11111111111111111111111111111111111111112", symbol: "SOL", name: "Wrapped SOL" },
       { mint: "XkeTXo1125vz5H9svJpGiw4JvLbN8VmMu9cmMvspump", symbol: "DREGG", name: "Dragon's Egg" },
     ];
-    const cache = new Map();
+    const cache = new Map(), resolved = new Map();
     const short = (m) => `${m.slice(0, 4)}…${m.slice(-4)}`;
+    // logos: a GitHub "blob" page is HTML, not an image; point at the raw file instead
+    const logoUrl = (u) => { if (!u) return null; const m = String(u).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^?]+)/); return m ? `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}` : String(u).split("?")[0] + (String(u).includes("?") && !/github/.test(u) ? "?" + String(u).split("?")[1] : ""); };
     const isMint = (s) => { try { new PublicKey(s); return s.length >= 32; } catch { return false; } };
     let store = {}; try { store = JSON.parse(localStorage.getItem("passwap.tokens") || "{}"); } catch {}
     const remember = (m) => { try { store[m.mint] = { symbol: m.symbol, name: m.name, logo: m.logo, decimals: m.decimals, verified: m.verified, program: m.program }; localStorage.setItem("passwap.tokens", JSON.stringify(store)); } catch {} };
 
     async function jup(query) {
-      try { const r = await fetch(JUP + encodeURIComponent(query), { mode: "cors" }); if (!r.ok) return []; const d = await r.json(); return (Array.isArray(d) ? d : d.tokens || []).map((t) => ({ mint: t.id, symbol: t.symbol, name: t.name, logo: t.icon, decimals: t.decimals, verified: !!t.isVerified, program: t.tokenProgram, source: "jupiter" })); } catch { return []; }
+      try { const r = await fetch(JUP + encodeURIComponent(query), { mode: "cors" }); if (!r.ok) return []; const d = await r.json(); return (Array.isArray(d) ? d : d.tokens || []).map((t) => ({ mint: t.id, symbol: t.symbol, name: t.name, logo: logoUrl(t.icon), decimals: t.decimals, verified: !!t.isVerified, program: t.tokenProgram, source: "jupiter" })); } catch { return []; }
     }
     // Token-2022 metadata extension, then Metaplex, via one parsed account read each
     async function onchain(mint) {
@@ -42,7 +44,7 @@
         const md = await conn.getAccountInfo(pda);
         if (md) { const d = md.data; const str = (o) => { const n = new DataView(d.buffer, d.byteOffset).getUint32(o, true); return new TextDecoder().decode(d.slice(o + 4, o + 4 + n)).replace(/\0+$/, "").trim(); }; try { meta.name = str(65); meta.symbol = str(65 + 4 + 32) || meta.symbol; meta.uri = str(65 + 4 + 32 + 4 + 10); } catch {} }
       }
-      if (!meta.logo && meta.uri) { try { const j = await (await fetch(meta.uri, { mode: "cors" })).json(); meta.logo = j.image || null; } catch {} }
+      if (!meta.logo && meta.uri) { try { const j = await (await fetch(meta.uri, { mode: "cors" })).json(); meta.logo = logoUrl(j.image); } catch {} }
       return meta;
     }
     async function resolve(mint) {
@@ -53,7 +55,7 @@
         if (!meta) { try { meta = await onchain(mint); } catch {} }
         if (!meta && store[mint]) meta = { mint, ...store[mint], source: "cache" };
         if (!meta) meta = { mint, symbol: short(mint), name: "", logo: null, decimals: 0, verified: false, program: null, source: "none" };
-        remember(meta); return meta;
+        remember(meta); resolved.set(mint, meta); return meta;
       })();
       cache.set(mint, p); return p;
     }
@@ -110,6 +112,8 @@
       input.addEventListener("blur", () => { setTimeout(() => { box.hidden = true; }, 150); });
       return { set: pick, refreshHoldings: () => { held = null; } };
     }
-    return { resolve, holdings, search, label, fmt, attachPicker, COMMON };
+    const cached = (mint) => resolved.get(mint) || null;
+    const sym = (mint) => { const m = resolved.get(mint); return m ? m.symbol : short(mint); };
+    return { resolve, cached, sym, holdings, search, label, fmt, attachPicker, COMMON };
   };
 })(typeof self !== "undefined" ? self : this);

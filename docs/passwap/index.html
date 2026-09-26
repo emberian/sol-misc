@@ -33,6 +33,12 @@
   .wallet { display:flex; justify-content:space-between; align-items:center; gap:12px; font-size:13px; color:var(--soft); }
   details { margin-top: 12px; color: var(--soft); font-size: 13px; } summary { cursor: pointer; }
   footer { color:var(--dim); font-size:12px; margin-top:24px; }
+  .pick { position: relative; }
+  .tok-box { position:absolute; left:0; right:0; z-index:10; background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-top:4px; max-height:280px; overflow:auto; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+  .tok-head { color:var(--dim); font-size:11px; letter-spacing:.06em; text-transform:uppercase; padding:8px 10px 4px; }
+  .tok { display:flex; align-items:center; gap:8px; padding:6px 10px; cursor:pointer; font-size:13px; } .tok:hover { background:var(--bg); }
+  .tok img, .tok-blank { width:18px; height:18px; border-radius:50%; flex:none; background:var(--line); }
+  .tok-name { color:var(--soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .tok-mint { color:var(--dim); font-size:11px; margin-left:auto; } .tok-ok { color:var(--ok); } .tok-bal { color:var(--soft); font-size:12px; }
 </style>
 </head>
 <body>
@@ -69,12 +75,12 @@
 
   <section id="paneMake" role="tabpanel" hidden>
     <div class="row">
-      <div><label for="mintA">token you give (mint)</label><input id="mintA" value="XkeTXo1125vz5H9svJpGiw4JvLbN8VmMu9cmMvspump" spellcheck="false"></div>
-      <div><label for="mintB">token you receive (mint)</label><input id="mintB" value="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" spellcheck="false"></div>
+      <div class="pick"><label for="mintA">token you give</label><input id="mintA" placeholder="search, or paste a mint" autocomplete="off" spellcheck="false"></div>
+      <div class="pick"><label for="mintB">token you receive</label><input id="mintB" placeholder="search, or paste a mint" autocomplete="off" spellcheck="false"></div>
     </div>
     <div class="row">
-      <div><label for="amountA">amount you give</label><input id="amountA" inputmode="decimal" placeholder="888888"></div>
-      <div><label for="amountB">the least you accept for all of it</label><input id="amountB" inputmode="decimal" placeholder="300"></div>
+      <div><label for="amountA" id="amountALabel">amount you give</label><input id="amountA" inputmode="decimal" placeholder="888888"></div>
+      <div><label for="amountB" id="amountBLabel">the least you accept for all of it</label><input id="amountB" inputmode="decimal" placeholder="300"></div>
     </div>
     <p class="sub" style="margin:10px 0 0" id="makeFeeNote"></p>
     <div class="kv" id="makeQuote"></div>
@@ -102,6 +108,7 @@
 <script src="https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js"></script>
 <script src="passwap.js"></script>
 <script src="wallet.js"></script>
+<script src="tokens.js"></script>
 <script>
 (async function () {
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
@@ -112,6 +119,8 @@
   const conn = new web3.Connection(RPC, "confirmed");
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const pw = makePasswap(web3, nacl, PROGRAM_ID, abi);
+  const tokens = passwapTokens(web3, conn);
+  const symOf = async (mint) => { try { return (await tokens.resolve(mint.toBase58())).symbol; } catch { return mint.toBase58().slice(0, 4) + "…"; } };
   document.getElementById("programId").textContent = PROGRAM_ID;
   document.getElementById("rpcName").textContent = new URL(RPC).host + (storedRpc && !q.get("rpc") ? " (yours)" : "");
   document.getElementById("rpcName").onclick = (e) => { e.preventDefault(); const v = prompt("rpc url for this browser (empty to go back to the default)", storedRpc || ""); if (v === null) return; try { v.trim() ? localStorage.setItem("passwap.rpc", v.trim()) : localStorage.removeItem("passwap.rpc"); } catch {} location.reload(); };
@@ -135,6 +144,7 @@
     $("walletState").textContent = `connected via ${p.name}: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`;
     $("connectBtn").textContent = "connected";
     if (offerCache) { await computeOpens(); quote(); }
+    for (const p of Object.values(pickers)) p.refreshHoldings();
     if (!$("paneMake").hidden) makeQuote();
     refreshButtons();
   }
@@ -178,8 +188,10 @@
     const vault = pw.ata(o.vaultAuth, o.mintA, tpA);
     let remaining = 0n; try { remaining = BigInt((await conn.getTokenAccountBalance(vault)).value.amount); } catch {}
     offerCache.remaining = remaining;
-    $("offerView").innerHTML = `<div>available</div><div>${fmt(remaining, decA)} of <span class="mono">${o.mintA.toBase58()}</span>${remaining < o.amountA ? ` <span class="dim">(of ${fmt(o.amountA, decA)} originally)</span>` : ""}</div>
-      <div>rate</div><div>at least ${fmt(o.amountB, decB)} of <span class="mono">${o.mintB.toBase58()}</span> per ${fmt(o.amountA, decA)} taken, plus a ${abi.fee.percent}% fee on what you pay</div>
+    const [symA, symB] = await Promise.all([symOf(o.mintA), symOf(o.mintB)]); offerCache.symA = symA; offerCache.symB = symB;
+    const tag = (sym, mint) => { const s = mint.toBase58(), sh = `${s.slice(0, 4)}…${s.slice(-4)}`; return sym === sh ? `<span class="mono" title="${s}">${sh}</span>` : `<b>${sym}</b> <span class="dim mono" title="${s}">${sh}</span>`; };
+    $("offerView").innerHTML = `<div>available</div><div>${fmt(remaining, decA)} ${tag(symA, o.mintA)}${remaining < o.amountA ? ` <span class="dim">(of ${fmt(o.amountA, decA)} originally)</span>` : ""}</div>
+      <div>rate</div><div>at least ${fmt(o.amountB, decB)} ${tag(symB, o.mintB)} per ${fmt(o.amountA, decA)} ${symA} taken, plus a ${abi.fee.percent}% fee on what you pay</div>
       <div>maker</div><div class="mono">${o.maker.toBase58()}</div><div>claim key</div><div class="mono">${o.claimKey.toBase58()}</div>
       <div>maker can cancel</div><div>${o.notBefore > 0n ? "not before " + new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time"}</div>
       <div>custody</div><div>2-of-3 multisig <span class="mono">${o.vaultAuth.toBase58()}</span>${o.vaultAuth.equals(pw.vaultAuth(addr)) ? "" : ' <span class="bad">(does not match the derived address!)</span>'}<br>vault <span class="mono">${pw.ata(o.vaultAuth, o.mintA, tpA).toBase58()}</span></div>`;
@@ -197,12 +209,12 @@
   }
   function quote() {
     if (!offerCache) return;
-    const { o, decA, decB, remaining } = offerCache;
+    const { o, decA, decB, remaining, symA = "", symB = "" } = offerCache;
     let takeA; try { takeA = toBase($("takeAmount").value, decA); } catch { takeA = 0n; }
     if (takeA <= 0n || takeA > remaining) { $("quote").innerHTML = `<div>you pay</div><div class="warn">enter an amount between ${fmt(1n, decA)} and ${fmt(remaining, decA)}</div>`; return; }
     const payB = pw.priceFor(o, takeA), fee = pw.feeOf(payB);
     const opens = offerCache.opens || [];
-    $("quote").innerHTML = `<div>you receive</div><div>${fmt(takeA, decA)}</div><div>you pay</div><div>${fmt(payB, decB)} + ${fmt(fee, decB)} fee = <b>${fmt(payB + fee, decB)}</b> of <span class="mono">${o.mintB.toBase58()}</span>${takeA < remaining ? ` <span class="dim">(partial: the offer stays open with ${fmt(remaining - takeA, decA)})</span>` : ""}</div>
+    $("quote").innerHTML = `<div>you receive</div><div>${fmt(takeA, decA)} ${symA}</div><div>you pay</div><div>${fmt(payB, decB)} + ${fmt(fee, decB)} fee = <b>${fmt(payB + fee, decB)} ${symB}</b>${takeA < remaining ? ` <span class="dim">(partial: the offer stays open with ${fmt(remaining - takeA, decA)})</span>` : ""}</div>
       <div>one-time SOL</div><div>${opens.length ? opens.map(([l, w]) => `${fmtSol(l)} ${w}`).join("<br>") : "none: every account this needs already exists"}${wallet ? "" : "<br><span class=\"dim\">connect a wallet to see whether your own account for the token exists</span>"}</div>`;
   }
   async function claim() {
@@ -238,7 +250,7 @@
     if (!wallet) { log("connect a wallet first", "warn"); return; }
     $("makeBtn").disabled = true;
     try {
-      const mintA = new PublicKey($("mintA").value.trim()), mintB = new PublicKey($("mintB").value.trim());
+      const mintA = mintOf("mintA"), mintB = mintOf("mintB");
       const [tpA, decA, decB] = [await tokenProgramOf(mintA), await decimalsOf(mintA), await decimalsOf(mintB)];
       const amountA = toBase($("amountA").value, decA), amountB = toBase($("amountB").value, decB);
       const pass = $("makePass").value;
@@ -280,9 +292,10 @@
   $("connectBtn").onclick = () => connect().catch((e) => log("wallet: " + (e.message || e), "bad")); $("claimBtn").onclick = claim; $("makeBtn").onclick = make; $("cancelBtn").onclick = cancel;
   $("genPass").onclick = () => { $("makePass").value = genPass(); };
   $("takeAmount").addEventListener("input", quote);
+  const mintOf = (id) => new PublicKey(($(id).dataset.mint || $(id).value).trim());
   async function makeQuote() {
     try {
-      const mintA = new PublicKey($("mintA").value.trim());
+      const mintA = mintOf("mintA");
       const [tpA, decA] = [await tokenProgramOf(mintA), await decimalsOf(mintA)];
       let amountA = 0n; try { amountA = toBase($("amountA").value, decA); } catch {}
       const rows = [];
@@ -299,6 +312,12 @@
     } catch { $("makeQuote").innerHTML = ""; }
   }
   for (const id of ["mintA", "amountA"]) { $(id).addEventListener("change", makeQuote); $(id).addEventListener("blur", makeQuote); }
+  // token pickers: what the wallet holds, common tokens, search; a pasted mint is accepted as is
+  const pickers = {};
+  for (const [id, lbl, text] of [["mintA", "amountALabel", "amount you give"], ["mintB", "amountBLabel", "the least you accept for all of it"]]) {
+    pickers[id] = tokens.attachPicker($(id), { onPick: (m) => { $(lbl).textContent = `${text} (${m.symbol})`; makeQuote(); }, holdings: async () => wallet ? tokens.holdings(wallet) : [] });
+  }
+  if (!q.get("rpc") || /mainnet|helius|publicnode/.test(RPC)) { pickers.mintA.set("XkeTXo1125vz5H9svJpGiw4JvLbN8VmMu9cmMvspump").catch(() => {}); pickers.mintB.set("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").catch(() => {}); }
   $("tabMake").addEventListener("click", makeQuote);
   $("makeFeeNote").textContent = `this is a rate: a claimer can take part or all at no less than it. to buy instead of sell, deposit the token you pay with. a ${abi.fee.percent}% fee on the amount you give is charged now and not refunded on cancel.`;
   $("tabClaim").onclick = () => showTab("claim"); $("tabMake").onclick = () => showTab("make");
