@@ -33,7 +33,7 @@
   <h1>passwap · deploy</h1>
   <p class="sub">deploys the program through the upgradeable BPF loader from your own wallet: a buffer, a batch of writes signed once, then the deploy. your wallet pays the rent and holds the upgrade authority; close returns the rent.</p>
 
-  <section class="wallet"><span id="walletState">no wallet connected</span><button class="ghost" id="connectBtn">connect wallet</button></section>
+  <section class="wallet"><span id="walletState">no wallet connected</span><span id="walletPick" style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto"></span><button class="ghost" id="connectBtn">connect wallet</button></section>
 
   <section>
     <label for="rpc">rpc url</label>
@@ -95,8 +95,8 @@
     log("looking for wallets…");
     const list = await passwapWallets.list(web3);
     if (!list.length) { const d = passwapWallets.debug(); log(`no wallet found. install a Solana wallet (Talisman, Phantom, Solflare, Backpack) and reload.<br><span class="dim">seen: standard [${d.standard.join(", ")}] legacy [${d.legacy.join(", ")}] globals [${d.globals.join(", ")}]</span>`, "warn"); return; }
-    if (!pick && list.length > 1) { log("choose a wallet: " + list.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ") + ` <button class="ghost" data-w="rescan">rescan</button>`); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(b.dataset.w === "rescan" ? undefined : list[+b.dataset.w]); }); return; }
-    if (!pick && q.get("pick") !== null) { log("found one wallet: " + `<button class="ghost" data-w="0">${list[0].name}</button> <button class="ghost" data-w="rescan">rescan</button>`); document.querySelectorAll("#log button[data-w]").forEach((b) => { b.onclick = () => connect(b.dataset.w === "rescan" ? undefined : list[0]); }); return; }
+    const choose = (items) => { log(""); $("walletPick").innerHTML = items.map((w, i) => `<button class="ghost" data-w="${i}">${w.name}</button>`).join(" ") + ` <button class="ghost" data-w="rescan">rescan</button>`; $("walletPick").querySelectorAll("button").forEach((b) => { b.onclick = () => { $("walletPick").innerHTML = ""; connect(b.dataset.w === "rescan" ? undefined : items[+b.dataset.w]).catch((e) => log("wallet: " + (e.message || e), "bad")); }; }); };
+    if (!pick && (list.length > 1 || q.get("pick") !== null)) { choose(list); return; }
     const p = pick || list[0]; chosen = p;
     const r = await p.connect(); wallet = new PublicKey((r && r.publicKey ? r.publicKey : p.publicKey).toString());
     $("walletState").textContent = `connected via ${p.name}: ${wallet.toBase58().slice(0, 6)}…${wallet.toBase58().slice(-6)}`; $("connectBtn").textContent = "connected"; log(""); refresh();
@@ -185,8 +185,9 @@
     // A closed program can never run again, so any offer still open would lose its vault forever:
     // the vault's authority is the offer PDA, and a PDA can only sign while its program executes.
     log("checking for open offers…");
-    const open = await conn().getProgramAccounts(pid, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: 194 }] });
-    if (open.length && !confirm(`${open.length} offer(s) are still open:\n${open.map((a) => a.pubkey.toBase58()).join("\n")}\n\ntheir vaults are safe: each is a 2-of-3 multisig and its maker + claimer can move it without this program (see protocol.html). but the normal claim and cancel flow stops working, and each offer's own rent stays parked. close anyway?`)) return;
+    let open = null; try { open = await conn().getProgramAccounts(pid, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: 194 }] }); } catch {}
+    if (open === null && !confirm("this rpc will not list the program's accounts, so open offers could not be checked. look at explorer.html first. close anyway?")) return;
+    if (open && open.length && !confirm(`${open.length} offer(s) are still open:\n${open.map((a) => a.pubkey.toBase58()).join("\n")}\n\ntheir vaults are safe: each is a 2-of-3 multisig and its maker + claimer can move it without this program (see protocol.html). but the normal claim and cancel flow stops working, and each offer's own rent stays parked. close anyway?`)) return;
     if (!confirm(`close ${pid.toBase58()} and return its rent to your wallet? a closed program address can never be reused.`)) return;
     // the loader refuses a close in the same slot as a deploy or upgrade; wait a few slots if we just did one
     if (lastActionSlot !== null) { const c0 = conn(); while ((await c0.getSlot("confirmed")) < lastActionSlot + 3) await new Promise((r) => setTimeout(r, 400)); }

@@ -128,7 +128,9 @@
     const sigs = await conn.getSignaturesForAddress(new PublicKey(PROGRAM_ID), { limit: PAGE, before: before || undefined });
     if (!sigs.length) { $("more").disabled = true; if (!rows) $("activity").insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="dim">no activity yet</td></tr>`); return; }
     before = sigs[sigs.length - 1].signature;
-    const txs = []; for (let i = 0; i < sigs.length; i += 10) txs.push(...await conn.getParsedTransactions(sigs.slice(i, i + 10).map((s) => s.signature), { maxSupportedTransactionVersion: 0 }));
+    // one call per transaction, a few at a time: batched JSON-RPC is refused by some public endpoints
+    const txs = new Array(sigs.length); let next = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => { for (;;) { const i = next++; if (i >= sigs.length) return; try { txs[i] = await conn.getParsedTransaction(sigs[i].signature, { maxSupportedTransactionVersion: 0 }); } catch { txs[i] = null; } } }));
     const items = [];
     txs.forEach((tx, i) => {
       if (!tx) return;
