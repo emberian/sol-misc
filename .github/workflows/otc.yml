@@ -17,7 +17,9 @@ jobs:
   verify-build-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    defaults: { run: { working-directory: otc } }
+    defaults:
+      run:
+        working-directory: otc
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +27,9 @@ jobs:
       - name: cache verus
         id: verus-cache
         uses: actions/cache@v4
-        with: { path: ~/verus, key: verus-${{ env.VERUS_RELEASE }} }
+        with:
+          path: ~/verus
+          key: verus-${{ env.VERUS_RELEASE }}
       - name: fetch verus
         if: steps.verus-cache.outputs.cache-hit != 'true'
         run: |
@@ -61,11 +65,14 @@ jobs:
           sha256sum target/deploy/dregg_otc.so | tee sha256.txt
           echo "docs copy:" && sha256sum ../docs/otc/dregg_otc.so
       - uses: actions/upload-artifact@v4
-        with: { name: dregg_otc.so, path: otc/target/deploy/dregg_otc.so }
+        with:
+          name: dregg_otc.so
+          path: otc/target/deploy/dregg_otc.so
 
       # ---- client agreement and end-to-end
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with:
+          node-version: 22
       - name: js deps
         run: cd web && npm ci --silent || npm install --silent --no-audit --no-fund @solana/web3.js@1 tweetnacl bs58
       - name: vectors
