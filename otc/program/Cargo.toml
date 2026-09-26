@@ -16,6 +16,7 @@ custom-heap = []
 custom-panic = []
 
 [dependencies]
+dregg-otc-core = { path = "../core" }
 solana-program = { version = "=3.0.0", default-features = false }
 
 [profile.release]

@@ -4,16 +4,17 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const web3 = require("/Users/ember/dev/dregg-otc/web/node_modules/@solana/web3.js");
-const nacl = require("/Users/ember/dev/dregg-otc/web/node_modules/tweetnacl");
-const makeOtc = require("/Users/ember/dev/dregg-otc/web/otc.js");
+const web3 = require("/Users/ember/dev/sol-misc/otc/web/node_modules/@solana/web3.js");
+const nacl = require("/Users/ember/dev/sol-misc/otc/web/node_modules/tweetnacl");
+const makeOtc = require("/Users/ember/dev/sol-misc/otc/web/otc.js");
+const abi = require("/Users/ember/dev/sol-misc/otc/web/abi.json");
 
 const [rpc, programId, mintAStr, mintBStr, makerPath, payerPath] = process.argv.slice(2);
 const conn = new web3.Connection(rpc, "confirmed");
 const kp = (p) => web3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8"))));
 const maker = kp(makerPath), payer = kp(payerPath);
 const mintA = new web3.PublicKey(mintAStr), mintB = new web3.PublicKey(mintBStr);
-const otc = makeOtc(web3, nacl, programId);
+const otc = makeOtc(web3, nacl, programId, abi);
 const tpA = otc.P.token2022, tpB = otc.P.token;
 
 const bal = async (owner, mint, tp) => { try { return (await conn.getTokenAccountBalance(otc.ata(owner, mint, tp))).value.amount; } catch { return "0"; } };
@@ -61,13 +62,14 @@ console.log("offer1", offer1.toBase58(), "claim key", claimPk1.toBase58());
 }
 // right passphrase takes
 {
+  const payerA0 = BigInt(await bal(payer.publicKey, mintA, tpA)), makerB0 = BigInt(await bal(maker.publicKey, mintB, tpB));
   const claimKp = web3.Keypair.fromSecretKey(claim1.secretKey);
   const ix = otc.ixTake({ claimKey: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer: offer1, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB });
   const sig = await send([otc.ixCreateAtaIdempotent(payer.publicKey, payer.publicKey, mintA, tpA), otc.ixCreateAtaIdempotent(payer.publicKey, maker.publicKey, mintB, tpB), ix], [payer, claimKp]);
   console.log("take:", sig.slice(0, 20));
   assert((await conn.getAccountInfo(offer1)) === null, "offer closed");
-  assert(await bal(payer.publicKey, mintA, tpA) === AMOUNT_A.toString(), "payer received A");
-  assert(await bal(maker.publicKey, mintB, tpB) === AMOUNT_B.toString(), "maker received B");
+  assert(BigInt(await bal(payer.publicKey, mintA, tpA)) === payerA0 + AMOUNT_A, "payer received exactly A");
+  assert(BigInt(await bal(maker.publicKey, mintB, tpB)) === makerB0 + AMOUNT_B, "maker received exactly B");
   console.log("after take: payer A", await bal(payer.publicKey, mintA, tpA), "| maker B", await bal(maker.publicKey, mintB, tpB));
 }
 // ---- offer 2: make then cancel

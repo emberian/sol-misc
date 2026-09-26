@@ -7,14 +7,14 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { chromium } from "/Users/ember/tools/playwright/node_modules/playwright/index.mjs";
 const require = createRequire(import.meta.url);
-const web3 = require("/Users/ember/dev/dregg-otc/web/node_modules/@solana/web3.js");
+const web3 = require("/Users/ember/dev/sol-misc/otc/web/node_modules/@solana/web3.js");
 
 const [rpc, programId, mintA, mintB, makerPath, payerPath] = process.argv.slice(2);
-const docs = "/Users/ember/dev/dregg-otc/docs";
+const docs = "/Users/ember/dev/sol-misc/docs/otc";
 const server = http.createServer((req, res) => {
   const f = path.join(docs, req.url.split("?")[0] === "/" ? "index.html" : req.url.split("?")[0]);
   if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { "content-type": f.endsWith(".js") ? "text/javascript" : "text/html" }); res.end(fs.readFileSync(f));
+  res.writeHead(200, { "content-type": f.endsWith(".js") ? "text/javascript" : f.endsWith(".json") ? "application/json" : "text/html" }); res.end(fs.readFileSync(f));
 });
 await new Promise((r) => server.listen(8765, r));
 const secret = (p) => JSON.parse(fs.readFileSync(p, "utf8"));

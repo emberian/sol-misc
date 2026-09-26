@@ -98,7 +98,8 @@
   const PROGRAM_ID = q.get("program") || "7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6";
   const RPC = q.get("rpc") || "https://api.mainnet-beta.solana.com";
   const conn = new web3.Connection(RPC, "confirmed");
-  const otc = makeOtc(web3, nacl, PROGRAM_ID);
+  const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
+  const otc = makeOtc(web3, nacl, PROGRAM_ID, abi);
   document.getElementById("programId").textContent = PROGRAM_ID;
   document.getElementById("rpcName").textContent = new URL(RPC).host;
   const $ = (id) => document.getElementById(id);

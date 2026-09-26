@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["core", "program", "tools"]
+
+[workspace.dependencies]
+vstd = { git = "https://github.com/verus-lang/verus", rev = "aef82ed", default-features = false, features = ["alloc"] }
+verus_builtin_macros = { git = "https://github.com/verus-lang/verus", rev = "aef82ed" }
+verus_builtin = { git = "https://github.com/verus-lang/verus", rev = "aef82ed" }
