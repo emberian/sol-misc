@@ -54,6 +54,11 @@
     <label for="offerAddr">offer address</label>
     <input id="offerAddr" placeholder="the offer account you were given" autocomplete="off" spellcheck="false">
     <div class="kv" id="offerView" hidden></div>
+    <div id="takeBox" hidden>
+      <label for="takeAmount">how much to take (all of it by default; a partial take leaves the offer open)</label>
+      <input id="takeAmount" inputmode="decimal" spellcheck="false">
+      <div class="kv" id="quote"></div>
+    </div>
     <label for="passphrase">passphrase</label>
     <input id="passphrase" placeholder="the words you were given" autocomplete="off" spellcheck="false">
     <button class="primary" id="claimBtn" disabled>derive claim key</button>
@@ -69,8 +74,9 @@
     </div>
     <div class="row">
       <div><label for="amountA">amount you give</label><input id="amountA" inputmode="decimal" placeholder="888888"></div>
-      <div><label for="amountB">price you receive</label><input id="amountB" inputmode="decimal" placeholder="300"></div>
+      <div><label for="amountB">the least you accept for all of it</label><input id="amountB" inputmode="decimal" placeholder="300"></div>
     </div>
+    <p class="sub" style="margin:10px 0 0" id="makeFeeNote"></p>
     <label for="notBefore">no cancel before (optional)</label>
     <input id="notBefore" type="datetime-local" placeholder="leave empty to allow cancelling any time">
     <label for="makePass">passphrase for the claimer</label>
@@ -155,18 +161,32 @@
     const [decA, decB] = [await decimalsOf(o.mintA), await decimalsOf(o.mintB)];
     const [tpA, tpB] = [await tokenProgramOf(o.mintA), await tokenProgramOf(o.mintB)];
     offerCache = { addr, o, decA, decB, tpA, tpB };
-    $("offerView").innerHTML = `<div>you receive</div><div>${fmt(o.amountA, decA)} of <span class="mono">${o.mintA.toBase58()}</span></div>
-      <div>you pay</div><div>${fmt(o.amountB, decB)} + ${fmt(pw.feeOf(o.amountB), decB)} fee (${abi.fee.bps} bps) = <b>${fmt(o.amountB + pw.feeOf(o.amountB), decB)}</b> of <span class="mono">${o.mintB.toBase58()}</span></div>
+    const vault = pw.ata(o.vaultAuth, o.mintA, tpA);
+    let remaining = 0n; try { remaining = BigInt((await conn.getTokenAccountBalance(vault)).value.amount); } catch {}
+    offerCache.remaining = remaining;
+    $("offerView").innerHTML = `<div>available</div><div>${fmt(remaining, decA)} of <span class="mono">${o.mintA.toBase58()}</span>${remaining < o.amountA ? ` <span class="dim">(of ${fmt(o.amountA, decA)} originally)</span>` : ""}</div>
+      <div>rate</div><div>at least ${fmt(o.amountB, decB)} of <span class="mono">${o.mintB.toBase58()}</span> per ${fmt(o.amountA, decA)} taken, plus a ${abi.fee.percent}% fee on what you pay</div>
       <div>maker</div><div class="mono">${o.maker.toBase58()}</div><div>claim key</div><div class="mono">${o.claimKey.toBase58()}</div>
       <div>maker can cancel</div><div>${o.notBefore > 0n ? "not before " + new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time"}</div>
       <div>custody</div><div>2-of-3 multisig <span class="mono">${o.vaultAuth.toBase58()}</span>${o.vaultAuth.equals(pw.vaultAuth(addr)) ? "" : ' <span class="bad">(does not match the derived address!)</span>'}<br>vault <span class="mono">${pw.ata(o.vaultAuth, o.mintA, tpA).toBase58()}</span></div>`;
-    $("offerView").hidden = false; log(""); refreshButtons();
+    $("offerView").hidden = false; $("takeBox").hidden = false; $("takeAmount").value = fmt(remaining, decA); quote(); log(""); refreshButtons();
+  }
+  function quote() {
+    if (!offerCache) return;
+    const { o, decA, decB, remaining } = offerCache;
+    let takeA; try { takeA = toBase($("takeAmount").value, decA); } catch { takeA = 0n; }
+    if (takeA <= 0n || takeA > remaining) { $("quote").innerHTML = `<div>you pay</div><div class="warn">enter an amount between ${fmt(1n, decA)} and ${fmt(remaining, decA)}</div>`; return; }
+    const payB = pw.priceFor(o, takeA), fee = pw.feeOf(payB);
+    $("quote").innerHTML = `<div>you receive</div><div>${fmt(takeA, decA)}</div><div>you pay</div><div>${fmt(payB, decB)} + ${fmt(fee, decB)} fee = <b>${fmt(payB + fee, decB)}</b> of <span class="mono">${o.mintB.toBase58()}</span>${takeA < remaining ? ` <span class="dim">(partial: the offer stays open with ${fmt(remaining - takeA, decA)})</span>` : ""}</div>`;
   }
   async function claim() {
     if (!offerCache) return;
-    const { addr, o, tpA, tpB } = offerCache;
+    const { addr, o, tpA, tpB, decA, remaining } = offerCache;
     $("claimBtn").disabled = true;
     try {
+      const takeA = toBase($("takeAmount").value, decA);
+      if (takeA <= 0n || takeA > remaining) throw new Error("amount to take must be between " + fmt(1n, decA) + " and " + fmt(remaining, decA));
+      const payB = pw.priceFor(o, takeA);
       log("deriving claim key (a few seconds)…");
       const kp = await pw.deriveClaimKeypair($("passphrase").value, addr);
       const claimKp = web3.Keypair.fromSecretKey(kp.secretKey);
@@ -178,11 +198,11 @@
         pw.ixCreateAtaIdempotent(wallet, wallet, o.mintA, tpA),
         pw.ixCreateAtaIdempotent(wallet, o.maker, o.mintB, tpB),
         pw.ixCreateAtaIdempotent(wallet, pw.FEE_RECIPIENT, o.mintB, tpB),
-        pw.ixTake({ claimKey: claimKp.publicKey, payer: wallet, maker: o.maker, offer: addr, mintA: o.mintA, mintB: o.mintB, tokenProgramA: tpA, tokenProgramB: tpB }),
+        pw.ixTake({ claimKey: claimKp.publicKey, payer: wallet, maker: o.maker, offer: addr, mintA: o.mintA, mintB: o.mintB, tokenProgramA: tpA, tokenProgramB: tpB, takeA, payB }),
       ];
       const sig = await signAndSend(ixs, [claimKp]);
       log(`claimed. <a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
-      offerCache = null; $("offerView").hidden = true;
+      offerCache = null; $("offerView").hidden = true; $("takeBox").hidden = true;
     } catch (e) { log("failed: " + (e.message || e), "bad"); }
     finally { refreshButtons(); }
   }
@@ -204,7 +224,7 @@
       log("deriving claim key…");
       const kp = await pw.deriveClaimKeypair(pass, offer);
       const { ix, vaultAuth } = pw.ixMake({ maker: wallet, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: new PublicKey(kp.publicKey), notBefore });
-      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, vaultAuth, mintA, tpA), ix]);
+      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, vaultAuth, mintA, tpA), pw.ixCreateAtaIdempotent(wallet, pw.FEE_RECIPIENT, mintA, tpA), ix]);
       log(`offer created.\noffer address: <span class="mono ok">${offer.toBase58()}</span>\nshare the passphrase privately with the claimer, and this link:\n<span class="mono">${location.origin}${location.pathname}?offer=${offer.toBase58()}</span>\n<a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
     } catch (e) { log("failed: " + (e.message || e), "bad"); }
     finally { $("makeBtn").disabled = false; }
@@ -233,6 +253,8 @@
   }
   $("connectBtn").onclick = connect; $("claimBtn").onclick = claim; $("makeBtn").onclick = make; $("cancelBtn").onclick = cancel;
   $("genPass").onclick = () => { $("makePass").value = genPass(); };
+  $("takeAmount").addEventListener("input", quote);
+  $("makeFeeNote").textContent = `this sets a rate: a claimer may take part of the amount at no less than this price per unit, or all of it. to buy instead of sell, deposit the token you pay with and name the one you want as the token you receive. a ${abi.fee.percent}% fee on the amount you give is charged when the offer is created and is not refunded on cancel.`;
   $("tabClaim").onclick = () => showTab("claim"); $("tabMake").onclick = () => showTab("make");
   $("offerAddr").addEventListener("change", loadOffer); $("offerAddr").addEventListener("blur", loadOffer);
   $("passphrase").addEventListener("input", refreshButtons);

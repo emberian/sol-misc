@@ -8,14 +8,17 @@ User-facing documentation lives next to the app: [`protocol.html`](https://ember
 
 ## What it does
 
-- **Make**: the maker deposits `amount_a` of mint A into a vault and records the price (`amount_b`
-  of mint B) and a *claim key*, an Ed25519 pubkey derived off-chain from a passphrase
+- **Make**: the maker deposits `amount_a` of mint A into a vault and records a rate (at least `amount_b`
+  of mint B per `amount_a`) and a *claim key*, an Ed25519 pubkey derived off-chain from a passphrase
   (PBKDF2-SHA512, 600,000 rounds, salt `"passwap/v1/" ‖ offer_pubkey`). The vault's owner is an
   SPL token multisig, threshold 2 of `[offer PDA, maker, claim key]`, created in the same transaction.
-- **Take**: whoever can sign with the claim key pays `amount_b` to the maker and a fee of
-  `amount_b / 400` (25 bps) to the fee recipient, and receives the vault, atomically. The passphrase
-  never touches the chain, so a claim can't be sniped from the mempool.
-- **Cancel**: the maker reclaims any time before a take, unless the offer carries `not_before`, a
+- **Take**: whoever can sign with the claim key takes any `take_a` up to what the vault holds and pays
+  `pay_b` with `pay_b · amount_a ≥ amount_b · take_a` (the oriented bound: more is allowed, less is not),
+  plus a 0.088% fee on `pay_b`, atomically. A take that empties the vault closes the offer; otherwise
+  it stays open. The passphrase never touches the chain, so a claim can't be sniped from the mempool.
+  To buy rather than sell, deposit the token you pay with: the floor on what you receive per unit is
+  a ceiling on what you pay per unit.
+- **Cancel**: the maker reclaims whatever remains any time the offer is open, unless the offer carries `not_before`, a
   unix time before which cancel is refused (so an offer can be made credible during a negotiation).
 - **Recovery**: the program signs only as the PDA, one of three keys. Maker + claimer hold the other
   two and can move the vault with plain token-program instructions, program or no program.
@@ -25,12 +28,12 @@ Mint A and mint B may live under different token programs (Token / Token-2022).
 ## Layout and assurance
 
 ```
-core/      passwap-core     the pure part, verified with Verus (60 items, 0 errors); no_std, no allocator, no Vec
+core/      passwap-core     the pure part, verified with Verus (73 items, 0 errors); no_std, no allocator, no Vec
 PROPERTIES.md               every guarantee in one sentence, each naming its theorem, plus the trust boundary and the attack table
 program/   passwap          the SBF adapter on pinocchio (no allocator): gathers facts, calls core, executes the plan
 tools/     gen-abi          writes abi.json + vectors.json from core; nothing is hand-copied
 web/       passwap.js       client core driven by abi.json (Node and browser), incl. raw recovery builders
-scripts/   localtest.mjs    end-to-end against solana-test-validator: happy paths, 14 refusals, one off-program recovery
+scripts/   localtest.mjs    end-to-end against solana-test-validator: happy paths, partial takes, 20 refusals, one off-program recovery
            pagetest.mjs     the same, driven through the real page with an injected wallet
            vectors-test.mjs JS bytes == verified-core bytes, for offer, make, take, cancel
            deploytest.mjs   deploy.html driven headless: deploy a fresh id, byte-compare programdata, close, rent back
@@ -49,12 +52,13 @@ scripts/   localtest.mjs    end-to-end against solana-test-validator: happy path
   if the claim key signed, the payer signed, the offer is program-owned and is the PDA of its own
   contents, the mints match, the vault's owner is the recorded 2-of-3 multisig of exactly
   `[offer, maker, claim key]`, every token account is the expected associated account with the
-  expected mint and owner, and the moves are exactly `amount_b` payer→maker, `amount_b / 400`
-  payer→fee recipient, and `amount_a` vault→payer by the multisig with the PDA and the claim key
-  as signers. `cancel` requires the maker's signature and `now >= not_before`. `make` requires an
+  expected mint and owner, `0 < take_a ≤ vault balance`, `pay_b > 0`, `pay_b · amount_a ≥ amount_b · take_a`,
+  and the moves are exactly `pay_b` payer→maker, `fee(pay_b)` payer→fee recipient, and `take_a`
+  vault→payer by the multisig with the PDA and the claim key as signers, closing exactly when the
+  vault empties. `cancel` requires the maker's signature and `now >= not_before`. `make` requires an
   empty offer and multisig address at the derived PDAs, positive amounts, maker ≠ claim key.
 - An abstract ledger model of `transfer_checked` gives the signed balance change at every key
-  after each plan, and fifteen named property lemmas state the guarantees one per line, including
+  after each plan, and sixteen named property lemmas state the guarantees one per line, including
   `no_vault_moves_on_the_programs_signature_alone` and `the_parties_hold_two_of_three_keys`.
 
 **What stays trusted** (the adapter, ~300 lines): deriving the PDAs and associated-token addresses
@@ -70,9 +74,9 @@ generated from the core crate; `passwap.js` builds every instruction from `abi.j
 ## Build, verify, test
 
 ```sh
-~/tools/verus/verus-arm64-macos/verus core/src/lib.rs --crate-type lib   # 60 verified, 0 errors
+~/tools/verus/verus-arm64-macos/verus core/src/lib.rs --crate-type lib   # 73 verified, 0 errors
 cargo run -p passwap-tools --bin gen-abi -- web ../docs/passwap          # abi.json, vectors.json
-(cd program && cargo build-sbf)                                          # target/deploy/passwap.so, 54.7 KB, rent 0.38 SOL
+(cd program && cargo build-sbf)                                          # target/deploy/passwap.so, 62.0 KB, rent 0.43 SOL
 node scripts/vectors-test.mjs
 # local validator: see scripts/localtest.mjs, pagetest.mjs, deploytest.mjs headers
 # CI (.github/workflows/passwap.yml) verifies, builds, checks the generated ABI is committed, prints the .so hash, and runs vectors + localtest

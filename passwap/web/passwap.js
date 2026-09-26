@@ -6,10 +6,11 @@
 //   pw.offerPda(maker, seed)                        -> [PublicKey, bump], per abi.offer.pda_seeds
 //   pw.vaultAuth(offer)                             -> PublicKey, the vault's 2-of-3 multisig, per abi.vault_auth.pda_seeds
 //   pw.ata(owner, mint, tokenProgram)               -> PublicKey
-//   pw.feeOf(amountB)                               -> bigint, per abi.fee
+//   pw.feeOf(amount)                                -> bigint, per abi.fee (charged on the deposit at make, on the payment at take)
+//   pw.priceFor(offer, takeA)                       -> bigint, the smallest payment that clears the offer's rate for takeA
 //   pw.ixCreateAtaIdempotent(payer, owner, mint, tokenProgram)
 //   pw.ixMake({maker, seed, mintA, tokenProgramA, mintB, amountA, amountB, claimKey, notBefore}) -> {offer, vaultAuth, ix}
-//   pw.ixTake({claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB})
+//   pw.ixTake({claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB, takeA, payB})
 //   pw.ixCancel({maker, offer, mintA, tokenProgramA})
 //   pw.ixMultisigTransfer / pw.ixMultisigClose    -> raw token-program instructions for recovery without the program
 //   pw.readOffer(bytes) / pw.encodeOffer(fields) / pw.encodeArgs("make", fields)
@@ -81,7 +82,9 @@
     const offerPda = (maker, seed) => PublicKey.findProgramAddressSync(seedBytes(abi.offer.pda_seeds, { maker, seed }), PROGRAM_ID);
     const vaultAuth = (offer) => PublicKey.findProgramAddressSync(seedBytes(abi.vault_auth.pda_seeds, { offer }), PROGRAM_ID)[0];
     const ata = (owner, mint, tokenProgram) => PublicKey.findProgramAddressSync([owner.toBytes(), tokenProgram.toBytes(), mint.toBytes()], P.ata)[0];
-    const feeOf = (amountB) => BigInt(amountB) / BigInt(abi.fee.divisor);
+    const feeOf = (amount) => BigInt(amount) * BigInt(abi.fee.num) / BigInt(abi.fee.den);
+    // the least pay_b with pay_b * amount_a >= amount_b * take_a
+    const priceFor = (o, takeA) => { const n = BigInt(o.amountB) * BigInt(takeA), d = BigInt(o.amountA); return (n + d - 1n) / d; };
 
     // ---- instruction builders: accounts come from the abi's account tables, by name
     function buildIx(name, data, named) {
@@ -102,12 +105,13 @@
       const [offer] = offerPda(maker, seed);
       const va = vaultAuth(offer);
       const data = encodeArgs("make", { seed, amount_a: amountA, amount_b: amountB, claim_key: claimKey, mint_b: mintB, not_before: notBefore });
-      const ix = buildIx("make", data, { maker, offer, claim_key: claimKey, vault_auth: va, mint_a: mintA, maker_ata_a: ata(maker, mintA, tokenProgramA), vault: ata(va, mintA, tokenProgramA), token_program_a: tokenProgramA, system_program: P.system });
+      const ix = buildIx("make", data, { maker, offer, claim_key: claimKey, vault_auth: va, mint_a: mintA, maker_ata_a: ata(maker, mintA, tokenProgramA), vault: ata(va, mintA, tokenProgramA), fee_ata_a: ata(FEE_RECIPIENT, mintA, tokenProgramA), token_program_a: tokenProgramA, system_program: P.system });
       return { offer, vaultAuth: va, ix };
     }
-    function ixTake({ claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB }) {
+    function ixTake({ claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB, takeA, payB }) {
+      if (takeA === undefined || payB === undefined) throw new Error("ixTake needs takeA and payB (use priceFor for the least payment that clears the rate)");
       const va = vaultAuth(offer);
-      return buildIx("take", encodeArgs("take", {}), { claim_key: claimKey, payer, maker, offer, vault_auth: va, mint_a: mintA, mint_b: mintB,
+      return buildIx("take", encodeArgs("take", { take_a: takeA, pay_b: payB }), { claim_key: claimKey, payer, maker, offer, vault_auth: va, mint_a: mintA, mint_b: mintB,
         vault: ata(va, mintA, tokenProgramA), payer_ata_a: ata(payer, mintA, tokenProgramA), payer_ata_b: ata(payer, mintB, tokenProgramB), maker_ata_b: ata(maker, mintB, tokenProgramB),
         fee_ata_b: ata(FEE_RECIPIENT, mintB, tokenProgramB), token_program_a: tokenProgramA, token_program_b: tokenProgramB });
     }
@@ -127,6 +131,6 @@
         { pubkey: authority, isSigner: false, isWritable: false }, ...signers.map((s) => ({ pubkey: s, isSigner: true, isWritable: false }))];
       return new TransactionInstruction({ programId: tokenProgram, data: new Uint8Array([9]), keys });
     }
-    return { PROGRAM_ID, P, FEE_RECIPIENT, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
+    return { PROGRAM_ID, P, FEE_RECIPIENT, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, priceFor, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
   };
 });

@@ -48,17 +48,17 @@ fn ws(a: &AccountView) -> InstructionAccount<'_> { InstructionAccount::writable_
 
 // ───────── facts: stack copies of what the accounts carry, so no data borrow outlives fact gathering ─────────
 
-struct Tok { mint: [u8; 32], authority: [u8; 32], expected: Address }
+struct Tok { mint: [u8; 32], authority: [u8; 32], expected: Address, amount: u64 }
 fn read_tok(a: &AccountView, expected_owner: &Address, mint: &Address, token_program: &Address) -> Result<Tok, ProgramError> {
     let d = a.try_borrow()?;
-    let (m, o) = pw::parse_token_account(&d).ok_or(Err::NotTokenAccount)?;
-    let mut t = Tok { mint: [0; 32], authority: [0; 32], expected: ata_for(expected_owner, mint, token_program) };
+    let (m, o, amount) = pw::parse_token_account(&d).ok_or(Err::NotTokenAccount)?;
+    let mut t = Tok { mint: [0; 32], authority: [0; 32], expected: ata_for(expected_owner, mint, token_program), amount };
     t.mint.copy_from_slice(m);
     t.authority.copy_from_slice(o);
     Ok(t)
 }
 fn tok_facts<'a>(a: &'a AccountView, t: &'a Tok) -> pw::TokenFacts<'a> {
-    pw::TokenFacts { key: kb(a.address()), expected_key: kb(&t.expected), program: kb(a.owner()), mint: &t.mint, authority: &t.authority }
+    pw::TokenFacts { key: kb(a.address()), expected_key: kb(&t.expected), program: kb(a.owner()), mint: &t.mint, authority: &t.authority, amount: t.amount }
 }
 fn mint_facts<'a>(a: &'a AccountView) -> Result<pw::MintFacts<'a>, ProgramError> {
     let decimals = pw::parse_mint_decimals(&a.try_borrow()?).ok_or(Err::NotMint)?;
@@ -156,7 +156,7 @@ fn close_offer(accounts: &mut [AccountView], offer_i: usize, dest_key: &[u8]) ->
 pub fn process_instruction(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     match pw::parse_instruction(data).ok_or(Err::BadInstruction)? {
         pw::Instruction::Make(args) => make(program_id, accounts, &args),
-        pw::Instruction::Take => take(program_id, accounts),
+        pw::Instruction::Take(args) => take(program_id, accounts, args),
         pw::Instruction::Cancel => cancel(program_id, accounts),
     }
 }
@@ -170,6 +170,7 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
     let mint_a = acc(ro, M::MINT_A)?;
     let maker_ata_a = acc(ro, M::MAKER_ATA_A)?;
     let vault = acc(ro, M::VAULT)?;
+    let fee_ata_a = acc(ro, M::FEE_ATA_A)?;
     let token_program_a = acc(ro, M::TOKEN_PROGRAM_A)?;
     let system_program = acc(ro, M::SYSTEM_PROGRAM)?;
 
@@ -178,6 +179,7 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
     let (va, va_bump) = Address::find_program_address(&[abi::VAULT_AUTH_SEED.as_bytes(), kb(offer.address())], program_id);
     let t_maker = read_tok(maker_ata_a, maker.address(), mint_a.address(), mint_a.owner())?;
     let t_vault = read_tok(vault, &va, mint_a.address(), mint_a.owner())?;
+    let t_fee = read_tok(fee_ata_a, &FEE_RECIPIENT, mint_a.address(), mint_a.owner())?;
     let facts = pw::MakeFacts {
         maker: signer(maker),
         offer_key: kb(offer.address()),
@@ -189,6 +191,7 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
         mint_a: mint_facts(mint_a)?,
         maker_ata_a: tok_facts(maker_ata_a, &t_maker),
         vault: tok_facts(vault, &t_vault),
+        fee_ata_a: tok_facts(fee_ata_a, &t_fee),
         token_program_a: kb(token_program_a.address()),
         system_program: kb(system_program.address()),
     };
@@ -210,8 +213,9 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
         let ix = InstructionView { program_id: tp.address(), accounts: &metas, data: &[IX_INITIALIZE_MULTISIG2, plan.vault_auth.m] };
         invoke(&ix, &[vault_auth, s0, s1, s2])?;
     }
-    // 3) fund the vault from the maker's own account
+    // 3) fund the vault from the maker's own account, and pay the make fee
     exec_transfer(ro, &plan.fund, None)?;
+    exec_transfer(ro, &plan.fee, None)?;
     // 4) write the verified record; the plan borrows the facts, so take its bytes by copy first
     let offer_bytes = plan.offer_bytes;
     let mut od = accounts[M::OFFER].try_borrow_mut()?;
@@ -220,7 +224,7 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
     Ok(())
 }
 
-fn take(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+fn take(program_id: &Address, accounts: &mut [AccountView], args: pw::TakeArgs) -> ProgramResult {
     use abi::take as T;
     let ro: &[AccountView] = &*accounts;
     let claim_key = acc(ro, T::CLAIM_KEY)?;
@@ -246,6 +250,7 @@ fn take(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let t_mb = read_tok(maker_ata_b, maker.address(), mint_b.address(), mint_b.owner())?;
     let t_fb = read_tok(fee_ata_b, &FEE_RECIPIENT, mint_b.address(), mint_b.owner())?;
     let facts = pw::TakeFacts {
+        args,
         offer: offer_facts(offer, &ob, program_id),
         claim: signer(claim_key),
         payer: signer(payer),
@@ -270,6 +275,7 @@ fn take(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     exec_transfer(ro, &plan.pay, None)?;
     exec_transfer(ro, &plan.fee, None)?;
     exec_transfer(ro, &plan.release, Some(&s))?;
+    if !plan.closes { return Ok(()); }  // a partial take: the offer stays open with the rest of the vault
     exec_close(ro, &plan.close_vault, &s)?;
     let mut rent_to = [0u8; 32];
     rent_to.copy_from_slice(plan.offer_rent_to);

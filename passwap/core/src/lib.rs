@@ -31,6 +31,8 @@ pub const OFFER_VERSION: u8 = 2;
 pub const OFFER_LEN: usize = 194;
 pub const MAKE_ARGS_LEN: usize = 96;
 pub const MAKE_IX_LEN: usize = 97;
+pub const TAKE_ARGS_LEN: usize = 16;
+pub const TAKE_IX_LEN: usize = 17;
 pub const KEY_LEN: usize = 32;
 pub const TOKEN_ACCOUNT_MIN_LEN: usize = 72;
 pub const MINT_DECIMALS_OFFSET: usize = 44;
@@ -41,10 +43,37 @@ pub const MULTISIG_LEN: usize = 355;
 pub const MULTISIG_HEAD_LEN: usize = 99;
 pub const MULTISIG_M: u8 = 2;
 pub const MULTISIG_N: u8 = 3;
-/// The take fee is `amount_b / FEE_DIVISOR` of the payment token (400 = 25 basis points), paid by
-/// the taker on top of the price, to FEE_RECIPIENT's associated token account for mint B.
-pub const FEE_DIVISOR: u64 = 400;
-pub const FEE_RECIPIENT: [u8; 32] = [227, 129, 66, 219, 37, 55, 244, 242, 70, 243, 226, 238, 17, 63, 179, 70, 186, 98, 120, 3, 81, 178, 170, 175, 67, 149, 179, 97, 67, 35, 201, 162];
+/// Fees: `fee_of(x) = x * FEE_NUM / FEE_DEN` (0.088%). A make pays `fee_of(amount_a)` in mint A from the maker,
+/// on top of the deposit; a take pays `fee_of(amount_b)` in mint B from the taker, on top of the price. Both go
+/// to FEE_RECIPIENT's associated token account for that mint.
+pub const FEE_NUM: u64 = 88;
+pub const FEE_DEN: u64 = 100_000;
+pub const FEE_RECIPIENT: [u8; 32] = [212, 234, 129, 176, 81, 124, 31, 9, 209, 233, 172, 125, 67, 249, 118, 108, 142, 216, 185, 137, 217, 179, 126, 163, 107, 58, 233, 146, 238, 12, 116, 130];
+
+pub open spec fn fee_of(amount: u64) -> int { (amount as int) * (FEE_NUM as int) / (FEE_DEN as int) }
+
+/// `fee_of` in u128 so the product cannot overflow; the quotient is at most `amount`, so it fits u64.
+pub fn fee_amount(amount: u64) -> (r: u64)
+    ensures r == fee_of(amount), r <= amount,
+{
+    let q: u128 = (amount as u128) * (FEE_NUM as u128) / (FEE_DEN as u128);
+    proof { assert(q <= amount) by (nonlinear_arith) requires q == (amount as int) * (FEE_NUM as int) / (FEE_DEN as int), FEE_NUM < FEE_DEN; }
+    q as u64
+}
+
+/// The oriented bound: a payment `pay_b` for `take_a` clears the offer's rate `amount_b / amount_a` (never below it).
+pub open spec fn clears_rate(pay_b: u64, take_a: u64, amount_a: u64, amount_b: u64) -> bool {
+    (pay_b as int) * (amount_a as int) >= (amount_b as int) * (take_a as int)
+}
+pub fn check_rate(pay_b: u64, take_a: u64, amount_a: u64, amount_b: u64) -> (r: bool)
+    ensures r == clears_rate(pay_b, take_a, amount_a, amount_b),
+{
+    proof {
+        assert((pay_b as int) * (amount_a as int) <= (u64::MAX as int) * (u64::MAX as int)) by (nonlinear_arith) requires pay_b <= u64::MAX, amount_a <= u64::MAX;
+        assert((amount_b as int) * (take_a as int) <= (u64::MAX as int) * (u64::MAX as int)) by (nonlinear_arith) requires amount_b <= u64::MAX, take_a <= u64::MAX;
+    }
+    (pay_b as u128) * (amount_a as u128) >= (amount_b as u128) * (take_a as u128)
+}
 
 pub const TAG_MAKE: u8 = 0;
 pub const TAG_TAKE: u8 = 1;
@@ -276,16 +305,24 @@ impl<'a> MakeArgs<'a> {
     }
 }
 
+/// A take names how much of the deposit to take and how much to pay for it. The core admits it only if the
+/// payment clears the offer's rate: `pay_b * amount_a >= amount_b * take_a`. A full take at the exact price is
+/// `take_a = remaining, pay_b = amount_b * take_a / amount_a` rounded up.
+pub struct TakeArgs { pub take_a: u64, pub pay_b: u64 }
+impl TakeArgs {
+    pub open spec fn bytes(&self) -> Seq<u8> { spec_u64_to_le_bytes(self.take_a) + spec_u64_to_le_bytes(self.pay_b) }
+}
+
 pub enum Instruction<'a> {
     Make(MakeArgs<'a>),
-    Take,
+    Take(TakeArgs),
     Cancel,
 }
 
 pub open spec fn instruction_bytes(ix: &Instruction) -> Seq<u8> {
     match ix {
         Instruction::Make(a) => seq![TAG_MAKE] + a.bytes(),
-        Instruction::Take => seq![TAG_TAKE],
+        Instruction::Take(t) => seq![TAG_TAKE] + t.bytes(),
         Instruction::Cancel => seq![TAG_CANCEL],
     }
 }
@@ -307,6 +344,18 @@ pub fn encode_make_args(a: &MakeArgs) -> (out: [u8; MAKE_IX_LEN])
     out
 }
 
+pub fn encode_take_args(t: &TakeArgs) -> (out: [u8; TAKE_IX_LEN])
+    ensures out@ == seq![TAG_TAKE] + t.bytes(),
+{
+    proof { lemma_auto_spec_u64_to_from_le_bytes(); }
+    let mut out: [u8; TAKE_IX_LEN] = array_fill_for_copy_types(0u8);
+    out[0] = TAG_TAKE;
+    put_u64(&mut out, 1, t.take_a);
+    put_u64(&mut out, 9, t.pay_b);
+    proof { assert(out@ =~= seq![TAG_TAKE] + t.bytes()); }
+    out
+}
+
 /// Parse instruction data. A parse succeeds only when the bytes are exactly an encoding.
 pub fn parse_instruction<'a>(d: &'a [u8]) -> (r: Option<Instruction<'a>>)
     ensures
@@ -318,9 +367,11 @@ pub fn parse_instruction<'a>(d: &'a [u8]) -> (r: Option<Instruction<'a>>)
     if d.len() == 0 { return None; }
     let tag = *slice_index_get(d, 0);
     if tag == TAG_TAKE {
-        if d.len() != 1 { return None; }
-        proof { assert(d@ =~= seq![TAG_TAKE]); }
-        return Some(Instruction::Take);
+        if d.len() != TAKE_IX_LEN { return None; }
+        proof { lemma_auto_spec_u64_to_from_le_bytes(); }
+        let t = TakeArgs { take_a: u64_from_le_bytes(slice_subrange(d, 1, 9)), pay_b: u64_from_le_bytes(slice_subrange(d, 9, 17)) };
+        proof { assert(seq![TAG_TAKE] + t.bytes() =~= d@); }
+        return Some(Instruction::Take(t));
     }
     if tag == TAG_CANCEL {
         if d.len() != 1 { return None; }
@@ -342,13 +393,16 @@ pub fn parse_instruction<'a>(d: &'a [u8]) -> (r: Option<Instruction<'a>>)
 
 // ───────────────────────────── SPL token account views ─────────────────────────────
 
-/// (mint, owner) of an SPL token account: bytes [0..32] and [32..64].
-pub fn parse_token_account<'a>(d: &'a [u8]) -> (r: Option<(&'a [u8], &'a [u8])>)
+/// (mint, owner, amount) of an SPL token account: bytes [0..32], [32..64], [64..72].
+pub fn parse_token_account<'a>(d: &'a [u8]) -> (r: Option<(&'a [u8], &'a [u8], u64)>)
     ensures
-        match r { Some(mo) => mo.0@ == d@.subrange(0, 32) && mo.1@ == d@.subrange(32, 64), None => d@.len() < TOKEN_ACCOUNT_MIN_LEN },
+        match r {
+            Some(mo) => mo.0@ == d@.subrange(0, 32) && mo.1@ == d@.subrange(32, 64) && mo.2 == spec_u64_from_le_bytes(d@.subrange(64, 72)),
+            None => d@.len() < TOKEN_ACCOUNT_MIN_LEN,
+        },
 {
     if d.len() < TOKEN_ACCOUNT_MIN_LEN { return None; }
-    Some((key_at(d, 0), key_at(d, 32)))
+    Some((key_at(d, 0), key_at(d, 32), u64_from_le_bytes(slice_subrange(d, 64, 72))))
 }
 
 /// Decimals of an SPL mint: byte 44.
@@ -382,7 +436,7 @@ pub fn parse_multisig<'a>(d: &'a [u8]) -> (r: Option<MultisigView<'a>>)
 pub struct Signer<'a> { pub key: &'a [u8], pub is_signer: bool }
 pub struct MintFacts<'a> { pub key: &'a [u8], pub program: &'a [u8], pub decimals: u8 }
 /// A token account as presented, plus the address the adapter derived for it.
-pub struct TokenFacts<'a> { pub key: &'a [u8], pub expected_key: &'a [u8], pub program: &'a [u8], pub mint: &'a [u8], pub authority: &'a [u8] }
+pub struct TokenFacts<'a> { pub key: &'a [u8], pub expected_key: &'a [u8], pub program: &'a [u8], pub mint: &'a [u8], pub authority: &'a [u8], pub amount: u64 }
 /// The offer account as presented. `pda_ok`: the adapter recomputed the PDA from the decoded seed/maker/bump and it matched `key`.
 pub struct OfferFacts<'a> { pub key: &'a [u8], pub data: &'a [u8], pub owned_by_program: bool, pub pda_ok: bool }
 /// A multisig account as presented: `head` is its first 99 bytes when the account is exactly MULTISIG_LEN long, else empty.
@@ -458,12 +512,13 @@ pub struct MakeFacts<'a> {
     pub mint_a: MintFacts<'a>,
     pub maker_ata_a: TokenFacts<'a>,
     pub vault: TokenFacts<'a>,
+    pub fee_ata_a: TokenFacts<'a>,
     pub token_program_a: &'a [u8],
     pub system_program: &'a [u8],
 }
 /// Create and initialize the vault authority: an m-of-3 multisig at `key`, owned by `program`, signers [s0, s1, s2].
 pub struct MultisigInit<'a> { pub key: &'a [u8], pub program: &'a [u8], pub m: u8, pub s0: &'a [u8], pub s1: &'a [u8], pub s2: &'a [u8] }
-pub struct MakePlan<'a> { pub offer: Offer<'a>, pub offer_bytes: [u8; OFFER_LEN], pub vault_auth: MultisigInit<'a>, pub fund: Transfer<'a> }
+pub struct MakePlan<'a> { pub offer: Offer<'a>, pub offer_bytes: [u8; OFFER_LEN], pub vault_auth: MultisigInit<'a>, pub fund: Transfer<'a>, pub fee: Transfer<'a> }
 
 /// Everything a make needs to be admitted, stated over the facts alone.
 pub open spec fn make_conditions(f: &MakeFacts, a: &MakeArgs) -> bool {
@@ -476,6 +531,7 @@ pub open spec fn make_conditions(f: &MakeFacts, a: &MakeArgs) -> bool {
     &&& f.token_program_a@ == f.mint_a.program@
     &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
     &&& token_ok(&f.vault, f.vault_auth@, f.mint_a.key@, f.mint_a.program@)
+    &&& token_ok(&f.fee_ata_a, FEE_RECIPIENT@, f.mint_a.key@, f.mint_a.program@)
     &&& a.amount_a > 0 && a.amount_b > 0
     &&& a.claim_key@ != f.maker.key@
 }
@@ -490,6 +546,7 @@ pub open spec fn make_plan_is(f: &MakeFacts, a: &MakeArgs, p: &MakePlan) -> bool
     &&& p.vault_auth.key@ == f.vault_auth@ && p.vault_auth.program@ == f.mint_a.program@ && p.vault_auth.m == MULTISIG_M
     &&& p.vault_auth.s0@ == f.offer_key@ && p.vault_auth.s1@ == f.maker.key@ && p.vault_auth.s2@ == a.claim_key@
     &&& direct_transfer_is(&p.fund, f.mint_a.program@, f.maker_ata_a.key@, f.mint_a.key@, f.vault.key@, f.maker.key@, a.amount_a, f.mint_a.decimals)
+    &&& direct_transfer_is(&p.fee, f.mint_a.program@, f.maker_ata_a.key@, f.mint_a.key@, f.fee_ata_a.key@, f.maker.key@, fee_of(a.amount_a) as u64, f.mint_a.decimals)
 }
 
 pub fn decide_make<'a>(f: &MakeFacts<'a>, a: &MakeArgs<'a>) -> (r: Option<MakePlan<'a>>)
@@ -505,6 +562,7 @@ pub fn decide_make<'a>(f: &MakeFacts<'a>, a: &MakeArgs<'a>) -> (r: Option<MakePl
     if !bytes_eq(f.token_program_a, f.mint_a.program) { return None; }
     if !check_token(&f.maker_ata_a, f.maker.key, f.mint_a.key, f.mint_a.program) { return None; }
     if !check_token(&f.vault, f.vault_auth, f.mint_a.key, f.mint_a.program) { return None; }
+    if !check_token(&f.fee_ata_a, array_as_slice(&FEE_RECIPIENT), f.mint_a.key, f.mint_a.program) { return None; }
     if a.amount_a == 0 || a.amount_b == 0 { return None; }
     if bytes_eq(a.claim_key, f.maker.key) { return None; }
     let offer = Offer {
@@ -517,12 +575,17 @@ pub fn decide_make<'a>(f: &MakeFacts<'a>, a: &MakeArgs<'a>) -> (r: Option<MakePl
         program: f.mint_a.program, from: f.maker_ata_a.key, mint: f.mint_a.key, to: f.vault.key,
         authority: f.maker.key, multisig: false, pda: f.maker.key, cosigner: f.maker.key, amount: a.amount_a, decimals: f.mint_a.decimals,
     };
-    Some(MakePlan { offer, offer_bytes, vault_auth, fund })
+    let fee = Transfer {
+        program: f.mint_a.program, from: f.maker_ata_a.key, mint: f.mint_a.key, to: f.fee_ata_a.key,
+        authority: f.maker.key, multisig: false, pda: f.maker.key, cosigner: f.maker.key, amount: fee_amount(a.amount_a), decimals: f.mint_a.decimals,
+    };
+    Some(MakePlan { offer, offer_bytes, vault_auth, fund, fee })
 }
 
 // ── take ──
 
 pub struct TakeFacts<'a> {
+    pub args: TakeArgs,
     pub offer: OfferFacts<'a>,
     pub claim: Signer<'a>,
     pub payer: Signer<'a>,
@@ -538,7 +601,8 @@ pub struct TakeFacts<'a> {
     pub token_program_a: &'a [u8],
     pub token_program_b: &'a [u8],
 }
-pub struct TakePlan<'a> { pub offer: Offer<'a>, pub pay: Transfer<'a>, pub fee: Transfer<'a>, pub release: Transfer<'a>, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
+/// `closes`: this take empties the vault, so the vault and the offer close; otherwise the offer stays open with the rest.
+pub struct TakePlan<'a> { pub offer: Offer<'a>, pub pay: Transfer<'a>, pub fee: Transfer<'a>, pub release: Transfer<'a>, pub closes: bool, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
 
 /// Everything a take needs to be admitted, stated over the facts and the offer record's bytes.
 pub open spec fn take_conditions(f: &TakeFacts) -> bool {
@@ -558,13 +622,17 @@ pub open spec fn take_conditions(f: &TakeFacts) -> bool {
     &&& token_ok(&f.payer_ata_b, f.payer.key@, f.mint_b.key@, f.mint_b.program@)
     &&& token_ok(&f.maker_ata_b, f.maker_key@, f.mint_b.key@, f.mint_b.program@)
     &&& token_ok(&f.fee_ata_b, FEE_RECIPIENT@, f.mint_b.key@, f.mint_b.program@)
+    &&& 0 < f.args.take_a <= f.vault.amount
+    &&& f.args.pay_b > 0
+    &&& clears_rate(f.args.pay_b, f.args.take_a, rec_amount_a(d), rec_amount_b(d))
 }
 /// What a take plan is: the decoded offer, the payment, the fee, the release, the vault close, the rent refund.
 pub open spec fn take_plan_is(f: &TakeFacts, p: &TakePlan) -> bool {
     &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
-    &&& direct_transfer_is(&p.pay, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.maker_ata_b.key@, f.payer.key@, p.offer.amount_b, f.mint_b.decimals)
-    &&& direct_transfer_is(&p.fee, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.fee_ata_b.key@, f.payer.key@, (p.offer.amount_b / FEE_DIVISOR) as u64, f.mint_b.decimals)
-    &&& multisig_transfer_is(&p.release, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.payer_ata_a.key@, f.vault_auth.key@, f.offer.key@, f.claim.key@, p.offer.amount_a, f.mint_a.decimals)
+    &&& direct_transfer_is(&p.pay, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.maker_ata_b.key@, f.payer.key@, f.args.pay_b, f.mint_b.decimals)
+    &&& direct_transfer_is(&p.fee, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.fee_ata_b.key@, f.payer.key@, fee_of(f.args.pay_b) as u64, f.mint_b.decimals)
+    &&& multisig_transfer_is(&p.release, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.payer_ata_a.key@, f.vault_auth.key@, f.offer.key@, f.claim.key@, f.args.take_a, f.mint_a.decimals)
+    &&& p.closes == (f.args.take_a == f.vault.amount)
     &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.payer.key@, f.vault_auth.key@, f.offer.key@, f.claim.key@)
     &&& p.offer_rent_to@ == f.maker_key@
 }
@@ -590,20 +658,23 @@ pub fn decide_take<'a>(f: &TakeFacts<'a>) -> (r: Option<TakePlan<'a>>)
     if !check_token(&f.payer_ata_b, f.payer.key, f.mint_b.key, f.mint_b.program) { return None; }
     if !check_token(&f.maker_ata_b, f.maker_key, f.mint_b.key, f.mint_b.program) { return None; }
     if !check_token(&f.fee_ata_b, array_as_slice(&FEE_RECIPIENT), f.mint_b.key, f.mint_b.program) { return None; }
+    if f.args.take_a == 0 || f.args.take_a > f.vault.amount || f.args.pay_b == 0 { return None; }
+    if !check_rate(f.args.pay_b, f.args.take_a, offer.amount_a, offer.amount_b) { return None; }
     let pay = Transfer {
         program: f.mint_b.program, from: f.payer_ata_b.key, mint: f.mint_b.key, to: f.maker_ata_b.key,
-        authority: f.payer.key, multisig: false, pda: f.payer.key, cosigner: f.payer.key, amount: offer.amount_b, decimals: f.mint_b.decimals,
+        authority: f.payer.key, multisig: false, pda: f.payer.key, cosigner: f.payer.key, amount: f.args.pay_b, decimals: f.mint_b.decimals,
     };
     let fee = Transfer {
         program: f.mint_b.program, from: f.payer_ata_b.key, mint: f.mint_b.key, to: f.fee_ata_b.key,
-        authority: f.payer.key, multisig: false, pda: f.payer.key, cosigner: f.payer.key, amount: offer.amount_b / FEE_DIVISOR, decimals: f.mint_b.decimals,
+        authority: f.payer.key, multisig: false, pda: f.payer.key, cosigner: f.payer.key, amount: fee_amount(f.args.pay_b), decimals: f.mint_b.decimals,
     };
     let release = Transfer {
         program: f.mint_a.program, from: f.vault.key, mint: f.mint_a.key, to: f.payer_ata_a.key,
-        authority: f.vault_auth.key, multisig: true, pda: f.offer.key, cosigner: f.claim.key, amount: offer.amount_a, decimals: f.mint_a.decimals,
+        authority: f.vault_auth.key, multisig: true, pda: f.offer.key, cosigner: f.claim.key, amount: f.args.take_a, decimals: f.mint_a.decimals,
     };
+    let closes = f.args.take_a == f.vault.amount;
     let close_vault = Close { program: f.mint_a.program, account: f.vault.key, dest: f.payer.key, authority: f.vault_auth.key, pda: f.offer.key, cosigner: f.claim.key };
-    Some(TakePlan { offer, pay, fee, release, close_vault, offer_rent_to: f.maker_key })
+    Some(TakePlan { offer, pay, fee, release, closes, close_vault, offer_rent_to: f.maker_key })
 }
 
 // ── cancel ──
@@ -639,7 +710,7 @@ pub open spec fn cancel_conditions(f: &CancelFacts) -> bool {
 /// What a cancel plan is: the decoded offer, the refund, the vault close, the rent refund.
 pub open spec fn cancel_plan_is(f: &CancelFacts, p: &CancelPlan) -> bool {
     &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
-    &&& multisig_transfer_is(&p.refund, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.maker_ata_a.key@, f.vault_auth.key@, f.offer.key@, f.maker.key@, p.offer.amount_a, f.mint_a.decimals)
+    &&& multisig_transfer_is(&p.refund, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.maker_ata_a.key@, f.vault_auth.key@, f.offer.key@, f.maker.key@, f.vault.amount, f.mint_a.decimals)
     &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.maker.key@, f.vault_auth.key@, f.offer.key@, f.maker.key@)
     &&& p.offer_rent_to@ == f.maker.key@
 }
@@ -662,7 +733,7 @@ pub fn decide_cancel<'a>(f: &CancelFacts<'a>) -> (r: Option<CancelPlan<'a>>)
     if !check_token(&f.maker_ata_a, f.maker.key, f.mint_a.key, f.mint_a.program) { return None; }
     let refund = Transfer {
         program: f.mint_a.program, from: f.vault.key, mint: f.mint_a.key, to: f.maker_ata_a.key,
-        authority: f.vault_auth.key, multisig: true, pda: f.offer.key, cosigner: f.maker.key, amount: offer.amount_a, decimals: f.mint_a.decimals,
+        authority: f.vault_auth.key, multisig: true, pda: f.offer.key, cosigner: f.maker.key, amount: f.vault.amount, decimals: f.mint_a.decimals,
     };
     let close_vault = Close { program: f.mint_a.program, account: f.vault.key, dest: f.maker.key, authority: f.vault_auth.key, pda: f.offer.key, cosigner: f.maker.key };
     Some(CancelPlan { offer, refund, close_vault, offer_rent_to: f.maker.key })
@@ -702,9 +773,9 @@ pub proof fn lemma_transfer_delta(l: Ledger, t: &Transfer, k: Seq<u8>)
     assert(apply_transfer(l, t).dom() =~= l.dom());
 }
 
-/// After a take: the claimer paid exactly the price plus the fee, the maker received exactly the price,
-/// the fee recipient received exactly the fee, the vault gave up exactly the deposit, the claimer received
-/// exactly the deposit, and nothing else moved.
+/// After a take: the claimer paid exactly `pay_b` plus the fee on it, the maker received exactly `pay_b`, the fee
+/// recipient received exactly the fee, the vault gave up exactly `take_a`, the claimer received exactly `take_a`,
+/// and nothing else moved.
 pub proof fn theorem_take_effect(f: &TakeFacts, p: &TakePlan, l: Ledger, k: Seq<u8>)
     requires
         take_conditions(f), take_plan_is(f, p),
@@ -712,11 +783,11 @@ pub proof fn theorem_take_effect(f: &TakeFacts, p: &TakePlan, l: Ledger, k: Seq<
         l.dom().contains(f.vault.key@), l.dom().contains(f.payer_ata_a.key@), l.dom().contains(k),
     ensures
         delta(l, apply_transfer(apply_transfer(apply_transfer(l, &p.pay), &p.fee), &p.release), k)
-            == (if k == f.payer_ata_b.key@ { -(p.offer.amount_b as int) - (p.fee.amount as int) } else { 0 })
-             + (if k == f.maker_ata_b.key@ { p.offer.amount_b as int } else { 0 })
+            == (if k == f.payer_ata_b.key@ { -(f.args.pay_b as int) - (p.fee.amount as int) } else { 0 })
+             + (if k == f.maker_ata_b.key@ { f.args.pay_b as int } else { 0 })
              + (if k == f.fee_ata_b.key@ { p.fee.amount as int } else { 0 })
-             + (if k == f.vault.key@ { -(p.offer.amount_a as int) } else { 0 })
-             + (if k == f.payer_ata_a.key@ { p.offer.amount_a as int } else { 0 }),
+             + (if k == f.vault.key@ { -(f.args.take_a as int) } else { 0 })
+             + (if k == f.payer_ata_a.key@ { f.args.take_a as int } else { 0 }),
 {
     let l1 = apply_transfer(l, &p.pay);
     let l2 = apply_transfer(l1, &p.fee);
@@ -725,28 +796,33 @@ pub proof fn theorem_take_effect(f: &TakeFacts, p: &TakePlan, l: Ledger, k: Seq<
     lemma_transfer_delta(l2, &p.release, k);
 }
 
-/// After a cancel: the vault gave up exactly the deposit, the maker received exactly the deposit, nothing else moved.
+/// After a cancel: the vault gave up exactly its remaining balance, the maker received exactly that, nothing else moved.
 pub proof fn theorem_cancel_effect(f: &CancelFacts, p: &CancelPlan, l: Ledger, k: Seq<u8>)
     requires
         cancel_conditions(f), cancel_plan_is(f, p),
         l.dom().contains(f.vault.key@), l.dom().contains(f.maker_ata_a.key@), l.dom().contains(k),
     ensures
         delta(l, apply_transfer(l, &p.refund), k)
-            == (if k == f.vault.key@ { -(p.offer.amount_a as int) } else { 0 }) + (if k == f.maker_ata_a.key@ { p.offer.amount_a as int } else { 0 }),
+            == (if k == f.vault.key@ { -(f.vault.amount as int) } else { 0 }) + (if k == f.maker_ata_a.key@ { f.vault.amount as int } else { 0 }),
 {
     lemma_transfer_delta(l, &p.refund, k);
 }
 
-/// After a make: the maker's account gave up exactly the deposit, the vault received exactly the deposit, nothing else moved.
+/// After a make: the maker's account gave up exactly the deposit plus the fee, the vault received exactly the
+/// deposit, the fee recipient received exactly the fee, nothing else moved.
 pub proof fn theorem_make_effect(f: &MakeFacts, a: &MakeArgs, p: &MakePlan, l: Ledger, k: Seq<u8>)
     requires
         make_conditions(f, a), make_plan_is(f, a, p),
-        l.dom().contains(f.maker_ata_a.key@), l.dom().contains(f.vault.key@), l.dom().contains(k),
+        l.dom().contains(f.maker_ata_a.key@), l.dom().contains(f.vault.key@), l.dom().contains(f.fee_ata_a.key@), l.dom().contains(k),
     ensures
-        delta(l, apply_transfer(l, &p.fund), k)
-            == (if k == f.maker_ata_a.key@ { -(a.amount_a as int) } else { 0 }) + (if k == f.vault.key@ { a.amount_a as int } else { 0 }),
+        delta(l, apply_transfer(apply_transfer(l, &p.fund), &p.fee), k)
+            == (if k == f.maker_ata_a.key@ { -(a.amount_a as int) - (p.fee.amount as int) } else { 0 })
+             + (if k == f.vault.key@ { a.amount_a as int } else { 0 })
+             + (if k == f.fee_ata_a.key@ { p.fee.amount as int } else { 0 }),
 {
+    let l1 = apply_transfer(l, &p.fund);
     lemma_transfer_delta(l, &p.fund, k);
+    lemma_transfer_delta(l1, &p.fee, k);
 }
 
 // ───────────────────────────── named properties (PROPERTIES.md) ─────────────────────────────
@@ -756,14 +832,27 @@ pub proof fn theorem_make_effect(f: &MakeFacts, a: &MakeArgs, p: &MakePlan, l: L
 pub proof fn take_needs_the_claim_signature(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p) ensures f.claim.is_signer {}
 /// P2. The claim key that must sign is the one recorded in the offer.
 pub proof fn take_checks_the_recorded_claim_key(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p) ensures f.claim.key@ == p.offer.claim_key@ { lemma_offer_fields(&p.offer); }
-/// P3. The maker receives exactly the recorded price, from the claimer's own account, into the maker's own account for that mint.
-pub proof fn take_pays_exactly_the_price(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
-    ensures p.pay.amount == p.offer.amount_b, p.pay.from@ == f.payer_ata_b.key@, p.pay.to@ == f.maker_ata_b.key@,
-        f.payer_ata_b.authority@ == f.payer.key@, f.maker_ata_b.authority@ == f.maker_key@, p.pay.mint@ == p.offer.mint_b@ { lemma_offer_fields(&p.offer); }
-/// P4. The claimer receives exactly the recorded deposit, into their own account for that mint, out of the vault.
-pub proof fn take_releases_exactly_the_deposit(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
-    ensures p.release.amount == p.offer.amount_a, p.release.from@ == f.vault.key@, p.release.to@ == f.payer_ata_a.key@,
+/// P3. The maker receives the taker's payment in full, from the taker's own account into the maker's own account for
+/// that mint, and the payment clears the offer's rate: `pay_b / take_a >= amount_b / amount_a`. Taking everything
+/// at the exact price is the special case `take_a = amount_a, pay_b = amount_b`.
+pub proof fn take_pays_at_least_the_rate(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.pay.amount == f.args.pay_b, clears_rate(f.args.pay_b, f.args.take_a, p.offer.amount_a, p.offer.amount_b),
+        f.args.take_a == p.offer.amount_a ==> f.args.pay_b >= p.offer.amount_b,
+        p.pay.from@ == f.payer_ata_b.key@, p.pay.to@ == f.maker_ata_b.key@, f.payer_ata_b.authority@ == f.payer.key@, f.maker_ata_b.authority@ == f.maker_key@, p.pay.mint@ == p.offer.mint_b@
+{
+    lemma_offer_fields(&p.offer);
+    if f.args.take_a == p.offer.amount_a {
+        assert(f.args.pay_b >= p.offer.amount_b) by (nonlinear_arith)
+            requires (f.args.pay_b as int) * (p.offer.amount_a as int) >= (p.offer.amount_b as int) * (f.args.take_a as int), f.args.take_a == p.offer.amount_a, p.offer.amount_a > 0;
+    }
+}
+/// P4. The claimer receives exactly what they asked to take, never more than the vault holds, into their own account for that mint, out of the vault.
+pub proof fn take_releases_exactly_what_was_taken(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.release.amount == f.args.take_a, 0 < f.args.take_a <= f.vault.amount, p.release.from@ == f.vault.key@, p.release.to@ == f.payer_ata_a.key@,
         f.payer_ata_a.authority@ == f.payer.key@, p.release.mint@ == p.offer.mint_a@ { lemma_offer_fields(&p.offer); }
+/// P16. A take closes the vault and the offer exactly when it empties the vault; a partial take leaves the offer open with the rest.
+pub proof fn offers_close_exactly_when_emptied(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.closes == (f.args.take_a == f.vault.amount) {}
 /// P5. The only authorities a take uses are the claimer over the claimer's own account and the vault's multisig over the vault.
 pub proof fn take_moves_only_the_parties_own_funds(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
     ensures p.pay.authority@ == f.payer.key@ && !p.pay.multisig, p.fee.authority@ == f.payer.key@ && !p.fee.multisig,
@@ -773,9 +862,9 @@ pub proof fn take_refunds_rent_to_the_maker(f: &TakeFacts, p: &TakePlan) require
 /// P7. Only the maker can cancel, and only once `not_before` has passed.
 pub proof fn cancel_is_the_makers_alone_and_waits(f: &CancelFacts, p: &CancelPlan) requires cancel_conditions(f), cancel_plan_is(f, p)
     ensures f.maker.is_signer, f.maker.key@ == p.offer.maker@, f.now >= p.offer.not_before { lemma_offer_fields(&p.offer); }
-/// P8. A cancel refunds exactly the deposit to the maker's own account for that mint.
-pub proof fn cancel_refunds_exactly_the_deposit(f: &CancelFacts, p: &CancelPlan) requires cancel_conditions(f), cancel_plan_is(f, p)
-    ensures p.refund.amount == p.offer.amount_a, p.refund.to@ == f.maker_ata_a.key@, f.maker_ata_a.authority@ == f.maker.key@ { lemma_offer_fields(&p.offer); }
+/// P8. A cancel refunds exactly what the vault still holds to the maker's own account for that mint.
+pub proof fn cancel_refunds_exactly_the_remainder(f: &CancelFacts, p: &CancelPlan) requires cancel_conditions(f), cancel_plan_is(f, p)
+    ensures p.refund.amount == f.vault.amount, p.refund.to@ == f.maker_ata_a.key@, f.maker_ata_a.authority@ == f.maker.key@ { lemma_offer_fields(&p.offer); }
 /// P9. A make records exactly what was asked and funds the vault with exactly the deposit from the maker's own account.
 pub proof fn make_records_what_was_asked(f: &MakeFacts, a: &MakeArgs, p: &MakePlan) requires make_conditions(f, a), make_plan_is(f, a, p)
     ensures p.offer.amount_a == a.amount_a, p.offer.amount_b == a.amount_b, p.offer.claim_key@ == a.claim_key@, p.offer.not_before == a.not_before,
@@ -797,10 +886,19 @@ pub proof fn no_vault_moves_on_the_programs_signature_alone(t: &TakeFacts, tp: &
 /// P13. The maker and the claimer together hold two of the vault's three keys, so they can move it with no program at all.
 pub proof fn the_parties_hold_two_of_three_keys(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
     ensures f.vault_auth.head@[0] == 2, f.vault_auth.head@[1] == 3, f.vault_auth.head@.subrange(35, 67) == f.maker_key@, f.vault_auth.head@.subrange(67, 99) == f.claim.key@ {}
-/// P14. The fee is exactly amount_b / FEE_DIVISOR of the price, never more than the price, paid by the claimer to the fee recipient's own account.
-pub proof fn fee_is_exactly_the_rate(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
-    ensures p.fee.amount == p.offer.amount_b / FEE_DIVISOR, p.fee.amount <= p.offer.amount_b, p.fee.from@ == f.payer_ata_b.key@,
-        p.fee.to@ == f.fee_ata_b.key@, f.fee_ata_b.authority@ == FEE_RECIPIENT@, p.fee.mint@ == f.mint_b.key@ {}
+/// P14. Each fee is exactly `fee_of` of the amount it is charged on, never more than that amount, from the payer's own
+/// account to the fee recipient's own account for that mint: the taker on the price, the maker on the deposit.
+pub proof fn fees_are_exactly_the_rate(t: &TakeFacts, tp: &TakePlan, m: &MakeFacts, a: &MakeArgs, mp: &MakePlan)
+    requires take_conditions(t), take_plan_is(t, tp), make_conditions(m, a), make_plan_is(m, a, mp)
+    ensures
+        tp.fee.amount == fee_of(t.args.pay_b), tp.fee.amount <= t.args.pay_b, tp.fee.from@ == t.payer_ata_b.key@,
+        tp.fee.to@ == t.fee_ata_b.key@, t.fee_ata_b.authority@ == FEE_RECIPIENT@, tp.fee.mint@ == t.mint_b.key@,
+        mp.fee.amount == fee_of(a.amount_a), mp.fee.amount <= a.amount_a, mp.fee.from@ == m.maker_ata_a.key@,
+        mp.fee.to@ == m.fee_ata_a.key@, m.fee_ata_a.authority@ == FEE_RECIPIENT@, mp.fee.mint@ == m.mint_a.key@,
+{
+    assert(fee_of(t.args.pay_b) <= t.args.pay_b) by (nonlinear_arith) requires FEE_NUM < FEE_DEN;
+    assert(fee_of(a.amount_a) <= a.amount_a) by (nonlinear_arith) requires FEE_NUM < FEE_DEN;
+}
 /// P15. A make creates the vault's multisig as exactly 2-of-[offer PDA, maker, claim key], with maker and claim key distinct.
 pub proof fn make_creates_the_three_key_custody(f: &MakeFacts, a: &MakeArgs, p: &MakePlan) requires make_conditions(f, a), make_plan_is(f, a, p)
     ensures p.vault_auth.m == 2, p.vault_auth.s0@ == f.offer_key@, p.vault_auth.s1@ == f.maker.key@, p.vault_auth.s2@ == a.claim_key@,
@@ -819,14 +917,14 @@ pub mod abi {
 
     pub mod make {
         pub const MAKER: usize = 0; pub const OFFER: usize = 1; pub const CLAIM_KEY: usize = 2; pub const VAULT_AUTH: usize = 3; pub const MINT_A: usize = 4;
-        pub const MAKER_ATA_A: usize = 5; pub const VAULT: usize = 6; pub const TOKEN_PROGRAM_A: usize = 7; pub const SYSTEM_PROGRAM: usize = 8; pub const COUNT: usize = 9;
+        pub const MAKER_ATA_A: usize = 5; pub const VAULT: usize = 6; pub const FEE_ATA_A: usize = 7; pub const TOKEN_PROGRAM_A: usize = 8; pub const SYSTEM_PROGRAM: usize = 9; pub const COUNT: usize = 10;
     }
     pub const MAKE_ACCOUNTS: &[AccountSpec] = &[
         AccountSpec { name: "maker", signer: true, writable: true }, AccountSpec { name: "offer", signer: false, writable: true },
         AccountSpec { name: "claim_key", signer: false, writable: false }, AccountSpec { name: "vault_auth", signer: false, writable: true },
         AccountSpec { name: "mint_a", signer: false, writable: false }, AccountSpec { name: "maker_ata_a", signer: false, writable: true },
-        AccountSpec { name: "vault", signer: false, writable: true }, AccountSpec { name: "token_program_a", signer: false, writable: false },
-        AccountSpec { name: "system_program", signer: false, writable: false },
+        AccountSpec { name: "vault", signer: false, writable: true }, AccountSpec { name: "fee_ata_a", signer: false, writable: true },
+        AccountSpec { name: "token_program_a", signer: false, writable: false }, AccountSpec { name: "system_program", signer: false, writable: false },
     ];
     pub mod take {
         pub const CLAIM_KEY: usize = 0; pub const PAYER: usize = 1; pub const MAKER: usize = 2; pub const OFFER: usize = 3; pub const VAULT_AUTH: usize = 4;
@@ -862,6 +960,9 @@ pub mod abi {
         FieldSpec { name: "vault_auth", offset: 162, len: 32, kind: "pubkey" },
     ];
     /// Instruction data after the one-byte tag.
+    pub const TAKE_ARGS_FIELDS: &[FieldSpec] = &[
+        FieldSpec { name: "take_a", offset: 0, len: 8, kind: "u64le" }, FieldSpec { name: "pay_b", offset: 8, len: 8, kind: "u64le" },
+    ];
     pub const MAKE_ARGS_FIELDS: &[FieldSpec] = &[
         FieldSpec { name: "seed", offset: 0, len: 8, kind: "u64le" }, FieldSpec { name: "amount_a", offset: 8, len: 8, kind: "u64le" },
         FieldSpec { name: "amount_b", offset: 16, len: 8, kind: "u64le" }, FieldSpec { name: "claim_key", offset: 24, len: 32, kind: "pubkey" },

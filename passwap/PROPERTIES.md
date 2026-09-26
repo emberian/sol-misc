@@ -1,7 +1,7 @@
 # What passwap proves, in plain words
 
 Every line below names a theorem in `core/src/lib.rs` that Verus checks on every build
-(`verus core/src/lib.rs --crate-type lib`, currently 60 items, 0 errors). The names are the
+(`verus core/src/lib.rs --crate-type lib`, currently 73 items, 0 errors). The names are the
 documentation; the bodies are one-line consequences of the decision specs. The user-facing
 version of this page, with the same guarantees in prose, is `docs/passwap/protocol.html`.
 
@@ -37,11 +37,12 @@ signs as the PDA; every vault move also carries the maker's or the claimer's tra
 |---|---|---|
 | P1 | No take without the claim key's signature. | `take_needs_the_claim_signature` |
 | P2 | The claim key that must sign is the one recorded in the offer. | `take_checks_the_recorded_claim_key` |
-| P3 | The maker receives exactly the recorded price, from the claimer's own account, into the maker's own account for that mint. | `take_pays_exactly_the_price` |
-| P4 | The claimer receives exactly the recorded deposit, into their own account for that mint, out of the vault. | `take_releases_exactly_the_deposit` |
+| P3 | The maker receives the taker's payment in full, from the taker's own account into the maker's own account for that mint, and the payment clears the offer's rate: `pay_b · amount_a ≥ amount_b · take_a`. Taking everything at the exact price is the special case, and then `pay_b ≥ amount_b`. A taker may pay more than the rate, never less. | `take_pays_at_least_the_rate` |
+| P4 | The claimer receives exactly what they asked to take, never more than the vault holds, into their own account for that mint, out of the vault. | `take_releases_exactly_what_was_taken` |
+| P16 | A take closes the vault and the offer exactly when it empties the vault; a partial take leaves the offer open with the rest. | `offers_close_exactly_when_emptied` |
 | P5 | The only authorities a take uses are the claimer over the claimer's own account and the vault's multisig over the vault. | `take_moves_only_the_parties_own_funds` |
 | P6 | The offer account's rent goes back to the maker. | `take_refunds_rent_to_the_maker` |
-| P14 | The fee is exactly `amount_b / FEE_DIVISOR`, never more than the price, from the claimer's own account to the fee recipient's own account for that mint. | `fee_is_exactly_the_rate` |
+| P14 | Each fee is exactly `fee_of(x) = x · 88 / 100000` of what it is charged on (the payment at take, the deposit at make), never more than that amount, from the payer's own account to the fee recipient's own account for that mint. | `fees_are_exactly_the_rate` |
 | P11 | A legitimate take is never refused. | `decide_take`, the `None` arm |
 
 ## Cancel
@@ -49,7 +50,7 @@ signs as the PDA; every vault move also carries the maker's or the claimer's tra
 | # | property | theorem |
 |---|---|---|
 | P7 | Only the maker can cancel, and only once `not_before` has passed. | `cancel_is_the_makers_alone_and_waits` |
-| P8 | A cancel refunds exactly the deposit to the maker's own account for that mint. | `cancel_refunds_exactly_the_deposit` |
+| P8 | A cancel refunds exactly what the vault still holds to the maker's own account for that mint. | `cancel_refunds_exactly_the_remainder` |
 
 ## Make
 
@@ -70,9 +71,9 @@ meaning of `transfer_checked`. The effect theorems give the signed change at *ev
 
 | after a … | at key k, the balance changes by | theorem |
 |---|---|---|
-| take | −(price + fee) at the claimer's B account, +price at the maker's B account, +fee at the fee recipient's B account, −deposit at the vault, +deposit at the claimer's A account, 0 elsewhere | `theorem_take_effect` |
-| cancel | −deposit at the vault, +deposit at the maker's A account, 0 elsewhere | `theorem_cancel_effect` |
-| make | −deposit at the maker's A account, +deposit at the vault, 0 elsewhere | `theorem_make_effect` |
+| take | −(pay_b + fee) at the claimer's B account, +pay_b at the maker's B account, +fee at the fee recipient's B account, −take_a at the vault, +take_a at the claimer's A account, 0 elsewhere | `theorem_take_effect` |
+| cancel | −remainder at the vault, +remainder at the maker's A account, 0 elsewhere | `theorem_cancel_effect` |
+| make | −(deposit + fee) at the maker's A account, +deposit at the vault, +fee at the fee recipient's A account, 0 elsewhere | `theorem_make_effect` |
 
 Because the deltas are signed and stated per key, the theorems hold even when two named accounts
 coincide, and conservation follows: the deltas of each transfer sum to zero.
@@ -84,7 +85,7 @@ coincide, and conservation follows: the deltas of each transfer sum to zero.
 | The offer record has exactly one byte layout: encoding produces it, decoding accepts only it, and equal bytes mean equal fields. | `encode_offer`, `decode_offer`, `lemma_offer_roundtrip`, `lemma_offer_fields` |
 | Instruction data parses only when it is exactly an encoding. | `parse_instruction`, `encode_make_args` |
 | A multisig head parses only when it is exactly 99 bytes, and its fields are the bytes at fixed offsets. | `parse_multisig` |
-| The core cannot panic: every index, add, shift and division is discharged. | all of it |
+| The rate check and the fee are computed in u128 with proved bounds; the core cannot panic: every index, add, shift, multiplication, division and cast is discharged. | `check_rate`, `fee_amount`, all of it |
 
 ## What is trusted, not proved
 
@@ -116,8 +117,11 @@ coincide, and conservation follows: the deltas of each transfer sum to zero.
   the record. The deploy page lists open offers and asks before closing.
 - **Upgrade authority** can replace the program, which can break the flow but cannot move a vault:
   P12 is a property of the custody structure, not of this version of the code. An authority of
-  none makes the program immutable and parks its rent (0.38 SOL for this binary) permanently.
-- **The fee recipient** is a compiled-in constant (`FEE_RECIPIENT`). Changing it is a new build.
+  none makes the program immutable and parks its rent (0.43 SOL for this binary) permanently.
+- **The fee recipient** is a compiled-in constant (`FEE_RECIPIENT`). Changing it is a new build. Fees
+  arrive in its associated token account per mint, created and paid for by the first person to pay a
+  fee in that mint; sweeping and closing an emptied one returns that rent to the recipient. No SOL
+  of the recipient's is ever needed.
 
 ## Negative tests
 
@@ -135,10 +139,14 @@ coincide, and conservation follows: the deltas of each transfer sum to zero.
 | second take of an already-taken offer | P10: the account is closed, no data |
 | cancel by a stranger | P7: maker must sign and match the record |
 | cancel before `not_before` | P7: `now >= not_before` |
+| take paying below the rate | `take_conditions`: `clears_rate` |
+| take of more than the vault holds, of nothing, or paying nothing | `take_conditions`: `0 < take_a ≤ vault.amount`, `pay_b > 0` |
+| make routing the make fee to the attacker | ATA check: the fee account's authority must be `FEE_RECIPIENT` |
 | make with a zero amount | `make_conditions`: both amounts positive |
 | make whose claim key is the maker | `make_conditions`: the three keys must be distinct |
 | maker alone moving the vault with a raw token instruction | the token program: 1 of 2 required signatures |
 | claimer alone moving the vault with a raw token instruction | the token program: 1 of 2 required signatures |
 
-And one positive test of the recovery path: maker + claimer move and close the vault with raw
+Positive tests of the general path: two partial takes at the rate (one overpaid) leave the offer open and
+cancel refunds exactly the remainder; a take that empties the vault closes the offer. And one of the recovery path: maker + claimer move and close the vault with raw
 token-program instructions, no passwap instruction in the transaction.

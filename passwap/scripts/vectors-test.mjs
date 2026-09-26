@@ -33,12 +33,15 @@ check("offer decode amounts", `${d.amountA}/${d.amountB}/${d.notBefore}`, `${o.a
 // make instruction data
 const m = vec.make_instruction;
 check("make ix data", hex(pw.encodeArgs("make", { seed: m.seed, amount_a: m.amount_a, amount_b: m.amount_b, claim_key: P(m.claim_key), mint_b: P(m.mint_b), not_before: m.not_before })), m.data_hex);
-check("take ix data", hex(pw.encodeArgs("take", {})), vec.take_instruction.data_hex);
+check("take ix data", hex(pw.encodeArgs("take", { take_a: vec.take_instruction.take_a, pay_b: vec.take_instruction.pay_b })), vec.take_instruction.data_hex);
+for (const f of vec.fee) check(`fee_of(${f.amount})`, pw.feeOf(f.amount).toString(), f.fee);
+check("priceFor full take is the price", pw.priceFor({ amountA: 888_888_000_000n, amountB: 300_000_000n }, 888_888_000_000n).toString(), "300000000");
+check("priceFor rounds up", pw.priceFor({ amountA: 3n, amountB: 2n }, 1n).toString(), "1");
 check("cancel ix data", hex(pw.encodeArgs("cancel", {})), vec.cancel_instruction.data_hex);
 // account tables: every builder names every account the abi lists (no missing names)
 const k = web3.Keypair.generate().publicKey;
 pw.ixMake({ maker: k, seed: 1n, mintA: k, tokenProgramA: pw.P.token2022, mintB: k, amountA: 1n, amountB: 1n, claimKey: k });
-pw.ixTake({ claimKey: k, payer: k, maker: k, offer: k, mintA: k, mintB: k, tokenProgramA: pw.P.token2022, tokenProgramB: pw.P.token });
+pw.ixTake({ claimKey: k, payer: k, maker: k, offer: k, mintA: k, mintB: k, tokenProgramA: pw.P.token2022, tokenProgramB: pw.P.token, takeA: 1n, payB: 1n });
 pw.ixCancel({ maker: k, offer: k, mintA: k, tokenProgramA: pw.P.token2022 });
 console.log("ok   account tables complete");
 if (failures) process.exit(1);

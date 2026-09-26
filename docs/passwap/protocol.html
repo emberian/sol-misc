@@ -33,23 +33,25 @@
   </nav>
 
   <h2 id="what">what it is</h2>
-  <p>passwap is an escrow for a one-off token swap between two people who may not know each other's wallets. the <b>maker</b> deposits some of token A and names a price in token B. instead of naming a counterparty wallet, the maker names a <b>claim key</b> derived from a passphrase. whoever holds the passphrase can <b>claim</b>: they pay the price and receive the deposit in one atomic transaction. until then the maker can <b>cancel</b> and take the deposit back.</p>
+  <p>passwap is an escrow for a token swap between two people who may not know each other's wallets. the <b>maker</b> deposits some of token A and names a <b>rate</b>: the least of token B they accept per unit of A. instead of naming a counterparty wallet, the maker names a <b>claim key</b> derived from a passphrase. whoever holds the passphrase can <b>claim</b>: they take some or all of the deposit, pay at least the rate for it, and receive it in one atomic transaction. until the vault is empty the maker can <b>cancel</b> and take the rest back.</p>
+  <p>the rate is an oriented bound, not a fixed price. a claimer may always pay more than it, never less. and it reads both ways: to <i>buy</i> at no more than X per unit, deposit the token you pay with and name the token you want as the one you receive; your floor on what you get per unit deposited is exactly a ceiling on what you pay per unit received.</p>
   <p>the on-chain program is small and its decision logic is machine-verified. but the design does not ask you to trust it with custody: every vault is owned by a 2-of-3 multisig of {the program, the maker, the claim key}. the program can never move a vault alone, and the maker and claimer together can move it with no program at all.</p>
 
   <h2 id="moves">the three moves</h2>
   <h3 id="make">make (the maker)</h3>
   <ol>
-    <li>you choose token A, the amount, token B, the price, a passphrase, and optionally a time before which you promise not to cancel.</li>
-    <li>your browser derives the claim key from the passphrase (see below) and builds one transaction that: creates the offer record, creates the vault's 2-of-3 multisig, and moves your deposit from your token account into the vault.</li>
+    <li>you choose token A, the amount, token B, the least you accept for all of it (which fixes the rate), a passphrase, and optionally a time before which you promise not to cancel.</li>
+    <li>your browser derives the claim key from the passphrase (see below) and builds one transaction that: creates the offer record, creates the vault's 2-of-3 multisig, moves your deposit from your token account into the vault, and pays the make fee.</li>
     <li>you get an offer address and a link. you share the passphrase privately with the person who should claim.</li>
   </ol>
   <h3 id="claim">claim (the taker)</h3>
   <ol>
     <li>you open the offer link and type the passphrase. your browser derives the claim key locally and checks it against the one recorded in the offer. a wrong passphrase is caught here, before anything is sent.</li>
-    <li>you connect a wallet holding token B. one transaction, signed by both your wallet and the claim key: the price goes from your token account to the maker's, the fee to the fee recipient's, and the deposit from the vault to your token account. the vault closes and the offer's rent goes back to the maker.</li>
+    <li>you choose how much of the deposit to take, all of it by default. the page quotes the least payment that clears the rate for that amount, rounded up, plus the fee.</li>
+    <li>you connect a wallet holding token B. one transaction, signed by both your wallet and the claim key: the payment goes from your token account to the maker's, the fee to the fee recipient's, and what you took from the vault to your token account. if that emptied the vault, the vault closes and the offer's rent goes back to the maker; otherwise the offer stays open with the rest, claimable later with the same passphrase.</li>
   </ol>
   <h3 id="cancel">cancel (the maker)</h3>
-  <p>any time before a claim, unless you set a no-cancel-before time that has not passed yet. the deposit returns to your token account, the vault closes, and the offer's rent comes back to you.</p>
+  <p>any time while the offer is open, unless you set a no-cancel-before time that has not passed yet. whatever the vault still holds returns to your token account, the vault closes, and the offer's rent comes back to you. the make fee is not refunded.</p>
 
   <h2 id="passphrase">the passphrase</h2>
   <p>the passphrase never touches the chain and never leaves your browser. it is stretched into an Ed25519 keypair:</p>
@@ -70,9 +72,10 @@
     <tr><td>vault token account (about 0.0021 SOL)</td><td>maker, at make</td><td>to the claimer at claim, to the maker at cancel</td></tr>
     <tr><td>vault multisig (355 bytes, about 0.0034 SOL)</td><td>maker, at make</td><td>no: the token program has no way to close a multisig</td></tr>
     <tr><td>your own token account for a token you have not held before (about 0.002 SOL)</td><td>whoever needs it</td><td>it stays yours</td></tr>
+    <tr><td>the fee recipient's token account for a token it has not received before (about 0.002 SOL)</td><td>whoever pays that fee first, once per token</td><td>to the fee recipient, when it sweeps and closes the account</td></tr>
     <tr><td>transaction fees</td><td>each signer</td><td>no (about 0.00001 SOL each)</td></tr>
   </table>
-  <p>so a completed trade costs the maker about 0.0034 SOL net, the claimer the fee above plus dust, and nothing else. the fee exists to pay back the SOL parked as the program's own rent and the cost of building and verifying it.</p>
+  <p>so a completed trade costs the maker the make fee plus about 0.0034 SOL, the claimer the take fee plus dust, and nothing else. the fees exist to pay back the SOL parked as the program's own rent and the cost of building and verifying it. the fee wallet never needs SOL of its own: the accounts that receive fees are created by the people paying them, and closing an emptied one returns its rent to the fee wallet.</p>
 
   <h2 id="chain">what lives on chain</h2>
   <p>one program, and per offer: an <b>offer record</b> (a PDA of the program), a <b>vault authority</b> (a PDA of the program that is an SPL token multisig, owned by the token program), and the <b>vault</b> (the vault authority's associated token account for token A).</p>
@@ -87,11 +90,11 @@
   <p>the program's decision logic is a pure library checked by the <a href="https://github.com/verus-lang/verus">Verus</a> verifier on every commit. in plain words, these hold for every claim, cancel and make the program executes:</p>
   <ol>
     <li>no claim without a signature by the claim key recorded in the offer.</li>
-    <li>the maker receives exactly the recorded price, into the maker's own account for token B.</li>
-    <li>the claimer receives exactly the recorded deposit, into the claimer's own account for token A.</li>
-    <li>the fee is exactly the price divided by the fee divisor, never more, and goes only to the fee recipient's own account.</li>
+    <li>the maker receives the claimer's payment in full, into the maker's own account for token B, and that payment clears the recorded rate: taking everything at the exact price is the special case.</li>
+    <li>the claimer receives exactly what they asked to take, never more than the vault holds, into the claimer's own account for token A. a take closes the offer exactly when it empties the vault.</li>
+    <li>each fee is exactly the rate above applied to what it is charged on (the deposit at make, the payment at take), never more, and goes only to the fee recipient's own account.</li>
     <li>the only authorities ever used are the claimer over the claimer's own account and the vault's multisig over the vault. the program never moves anyone else's tokens.</li>
-    <li>only the maker can cancel, and only once the no-cancel-before time has passed; the refund is exactly the deposit to the maker's own account.</li>
+    <li>only the maker can cancel, and only once the no-cancel-before time has passed; the refund is exactly what the vault still holds, to the maker's own account.</li>
     <li>a make records exactly what was asked and creates the vault's multisig as exactly 2-of-[program, maker, claim key], with maker and claim key distinct.</li>
     <li>the program never moves a vault on its own signature: every vault move carries the maker's or the claimer's signature too.</li>
     <li>a closed offer admits neither a claim nor a cancel: no double claim.</li>
@@ -128,6 +131,8 @@ spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
   <p><b>can the maker cancel right after i pay?</b> no. once your claim lands the offer is closed. before it lands, a cancel that lands first makes your claim fail harmlessly. a no-cancel-before time removes even that race for its duration.</p>
   <p><b>can the developer take the funds?</b> not through the program: it never moves a vault without the maker's or the claimer's signature, and the fee is fixed by the program's source. the developer can upgrade the program while holding its upgrade authority, which could break the flow but not the custody rule.</p>
   <p><b>can someone front-run my claim?</b> the claim needs a signature by the claim key. the passphrase is never sent anywhere, so an observer of the network cannot produce one.</p>
+  <p><b>can i take part of an offer?</b> yes. take any amount up to what the vault holds, pay at least the rate for it, and the rest stays claimable. the maker can cancel the rest at any time the no-cancel rule allows.</p>
+  <p><b>can i pay more than the rate?</b> yes; the bound only says you cannot pay less.</p>
   <p><b>which tokens work?</b> any SPL Token or Token-2022 mint, in any combination.</p>
   <p><b>what if the fee recipient does not have an account for token B?</b> the claim page creates it, idempotently, in the same transaction; you pay its rent (about 0.002 SOL), once per token.</p>
   <p><b>what does the maker pay if nobody ever claims?</b> the multisig's rent, about 0.0034 SOL, and transaction fees. everything else comes back on cancel.</p>
@@ -142,7 +147,7 @@ spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   document.getElementById("kdf").innerHTML = `<b>${esc(abi.claim_kdf.name)}</b>, ${abi.claim_kdf.rounds.toLocaleString()} rounds, salt <code>${esc(abi.claim_kdf.salt)}</code> followed by the 32 bytes of the offer address; the 32-byte output is the seed of an ${esc(abi.claim_kdf.key)}.<br><span class="dim">the passphrase is normalized first: NFKC, trimmed, lower-cased, single spaces between words. so capitalization and extra spaces do not matter.</span>`;
-  document.getElementById("fee").innerHTML = `<b>${abi.fee.bps} basis points</b> (${(abi.fee.bps / 100).toFixed(2)}%) of the price, computed as <code>${esc(abi.fee.amount)}</code>, paid by the <b>${esc(abi.fee.paid_by)}</b> in token B to <code class="mono">${esc(abi.fee.recipient)}</code> (its ${esc(abi.fee.to)}). there is no fee on make or cancel.`;
+  document.getElementById("fee").innerHTML = `<b>${esc(abi.fee.percent)}%</b> (${abi.fee.num} / ${abi.fee.den.toLocaleString()}, <code>${esc(abi.fee.formula)}</code>), twice:<br>on make: ${esc(abi.fee.on_make)}<br>on take: ${esc(abi.fee.on_take)}<br>to <code class="mono">${esc(abi.fee.recipient)}</code> (its ${esc(abi.fee.to)}). the make fee is not refunded on cancel. there is no fee on cancel.`;
   document.getElementById("derivations").innerHTML = `offer record: PDA of the program with seeds <code>[${abi.offer.pda_seeds.map(esc).join(", ")}]</code> (the seed is a number the maker picks; the page uses the current time)<br>vault authority: PDA of the program with seeds <code>[${abi.vault_auth.pda_seeds.map(esc).join(", ")}]</code>, an SPL multisig of ${abi.vault_auth.multisig.len} bytes, threshold ${abi.vault_auth.multisig.m} of ${abi.vault_auth.multisig.n}, signers <code>[${abi.vault_auth.multisig.signers.map(esc).join(", ")}]</code><br>vault: the ${esc(abi.vault_auth.vault)}<br>token programs: <span class="mono">${esc(abi.programs.token)}</span> and <span class="mono">${esc(abi.programs.token_2022)}</span>`;
   const tbl = document.getElementById("offerFields");
   for (const f of abi.offer.fields) tbl.insertAdjacentHTML("beforeend", `<tr><td>${esc(f.name)}</td><td>${f.offset}</td><td>${f.len}</td><td>${esc(f.kind)}</td></tr>`);
