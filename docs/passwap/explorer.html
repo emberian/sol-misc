@@ -115,7 +115,7 @@
       const v = vinfos[i]; const avail = v ? readU64(v.data, 64) : null; if (avail !== null && avail > 0n) open++;
       const status = avail === null ? `<span class="dim">vault closed by the parties</span>` : `${fmt(avail, dec(o.mintA))}${avail < o.amountA ? ` <span class="dim">of ${fmt(o.amountA, dec(o.mintA))}</span>` : ""}`;
       const nb = o.notBefore > 0n ? new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time";
-      tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${fmt(o.amountB, dec(o.mintB))} ${esc(tokens.sym(o.mintB.toString()))} / ${fmt(o.amountA, dec(o.mintA))} ${esc(tokens.sym(o.mintA.toString()))}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
+      tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${o.amountB === 0n ? "free" : `${fmt(o.amountB, dec(o.mintB))} ${esc(tokens.sym(o.mintB.toString()))} / ${fmt(o.amountA, dec(o.mintA))} ${esc(tokens.sym(o.mintA.toString()))}`}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
     });
     if (!offers.length) tbl.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="dim">no open offers</td></tr>`);
     $("sOpen").textContent = open;
@@ -157,8 +157,8 @@
     for (const it of items) {
       const when = it.time ? new Date(it.time * 1000).toLocaleString() : "";
       let amounts = "";
-      if (it.name === "make") amounts = `${amt(it.args.amount_a, it.mintA)} for ≥ ${amt(it.args.amount_b, it.mintB)}${it.args.not_before > 0n ? ` <span class="dim">no cancel before ${new Date(Number(it.args.not_before) * 1000).toLocaleDateString()}</span>` : ""}`;
-      if (it.name === "take") amounts = `took ${amt(it.args.take_a, it.mintA)} for ${amt(it.args.pay_b, it.mintB)}`;
+      if (it.name === "make") amounts = `${amt(it.args.amount_a, it.mintA)} for ${it.args.amount_b === 0n ? "free" : "≥ " + amt(it.args.amount_b, it.mintB)}${it.args.not_before > 0n ? ` <span class="dim">no cancel before ${new Date(Number(it.args.not_before) * 1000).toLocaleDateString()}</span>` : ""}`;
+      if (it.name === "take") amounts = `took ${amt(it.args.take_a, it.mintA)} for ${it.args.pay_b === 0n ? "free" : amt(it.args.pay_b, it.mintB)}`;
       tbl.insertAdjacentHTML("beforeend", `<tr class="${it.ok ? "" : "dim"}"><td>${esc(when)}</td><td><span class="tag ${it.name}">${it.name}</span>${it.ok ? "" : ' <span class="bad">failed</span>'}</td><td>${short(it.offer)}</td><td>${short(it.who)}</td><td>${amounts}</td><td><a class="mono" href="${explorerTx(it.sig)}">${it.sig.slice(0, 8)}…</a></td></tr>`);
       rows++;
     }

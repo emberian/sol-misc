@@ -83,7 +83,9 @@ jobs:
           set -e
           L=$RUNNER_TEMP/otc; mkdir -p $L
           for k in mintauth maker payer program; do solana-keygen new --no-bip39-passphrase --silent -o $L/$k.json; done
-          solana-test-validator --reset --quiet --ledger $L/ledger --mint $(solana-keygen pubkey $L/mintauth.json) --rpc-port 8899 >$L/validator.log 2>&1 &
+          DREGG=$(node -e "console.log(require('./web/abi.json').fee.make.mint)")
+          node scripts/fake-dregg-mint.mjs $(solana-keygen pubkey $L/mintauth.json) $L/dregg-mint.json
+          solana-test-validator --reset --quiet --ledger $L/ledger --mint $(solana-keygen pubkey $L/mintauth.json) --rpc-port 8899 --account $DREGG $L/dregg-mint.json >$L/validator.log 2>&1 &
           for i in $(seq 1 60); do curl -s -m 2 http://127.0.0.1:8899 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' | grep -q ok && break; sleep 1; done
           U=http://127.0.0.1:8899
           solana airdrop 10 $(solana-keygen pubkey $L/maker.json) -u $U >/dev/null
@@ -96,4 +98,6 @@ jobs:
           spl-token mint $MA 4000000 --recipient-owner $(solana-keygen pubkey $L/maker.json) -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json >/dev/null
           spl-token create-account $MB --owner $(solana-keygen pubkey $L/payer.json) -u $U --fee-payer $L/mintauth.json >/dev/null
           spl-token mint $MB 2000 --recipient-owner $(solana-keygen pubkey $L/payer.json) -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json >/dev/null
+          spl-token create-account $DREGG --owner $(solana-keygen pubkey $L/maker.json) --program-2022 -u $U --fee-payer $L/mintauth.json >/dev/null
+          spl-token mint $DREGG 100000 --recipient-owner $(solana-keygen pubkey $L/maker.json) --program-2022 -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json >/dev/null
           node scripts/localtest.mjs $U $PID $MA $MB $L/maker.json $L/payer.json

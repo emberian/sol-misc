@@ -37,6 +37,8 @@ check("take ix data", hex(pw.encodeArgs("take", { take_a: vec.take_instruction.t
 for (const f of vec.fee) check(`fee_of(${f.amount})`, pw.feeOf(f.amount).toString(), f.fee);
 check("priceFor full take is the price", pw.priceFor({ amountA: 888_888_000_000n, amountB: 300_000_000n }, 888_888_000_000n).toString(), "300000000");
 check("priceFor rounds up", pw.priceFor({ amountA: 3n, amountB: 2n }, 1n).toString(), "1");
+check("make fee is 1000 DREGG", pw.MAKE_FEE.toString(), "1000000000");
+check("free claim fee is 0", pw.feeOf(0n).toString(), "0");
 check("cancel ix data", hex(pw.encodeArgs("cancel", {})), vec.cancel_instruction.data_hex);
 // account tables: every builder names every account the abi lists (no missing names)
 const k = web3.Keypair.generate().publicKey;

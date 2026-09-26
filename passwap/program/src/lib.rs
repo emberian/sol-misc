@@ -170,7 +170,9 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
     let mint_a = acc(ro, M::MINT_A)?;
     let maker_ata_a = acc(ro, M::MAKER_ATA_A)?;
     let vault = acc(ro, M::VAULT)?;
-    let fee_ata_a = acc(ro, M::FEE_ATA_A)?;
+    let dregg_mint = acc(ro, M::DREGG_MINT)?;
+    let maker_dregg = acc(ro, M::MAKER_DREGG)?;
+    let fee_dregg = acc(ro, M::FEE_DREGG)?;
     let token_program_a = acc(ro, M::TOKEN_PROGRAM_A)?;
     let system_program = acc(ro, M::SYSTEM_PROGRAM)?;
 
@@ -179,7 +181,8 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
     let (va, va_bump) = Address::find_program_address(&[abi::VAULT_AUTH_SEED.as_bytes(), kb(offer.address())], program_id);
     let t_maker = read_tok(maker_ata_a, maker.address(), mint_a.address(), mint_a.owner())?;
     let t_vault = read_tok(vault, &va, mint_a.address(), mint_a.owner())?;
-    let t_fee = read_tok(fee_ata_a, &FEE_RECIPIENT, mint_a.address(), mint_a.owner())?;
+    let t_md = read_tok(maker_dregg, maker.address(), dregg_mint.address(), dregg_mint.owner())?;
+    let t_fd = read_tok(fee_dregg, &FEE_RECIPIENT, dregg_mint.address(), dregg_mint.owner())?;
     let facts = pw::MakeFacts {
         maker: signer(maker),
         offer_key: kb(offer.address()),
@@ -191,7 +194,9 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
         mint_a: mint_facts(mint_a)?,
         maker_ata_a: tok_facts(maker_ata_a, &t_maker),
         vault: tok_facts(vault, &t_vault),
-        fee_ata_a: tok_facts(fee_ata_a, &t_fee),
+        dregg: mint_facts(dregg_mint)?,
+        maker_dregg: tok_facts(maker_dregg, &t_md),
+        fee_dregg: tok_facts(fee_dregg, &t_fd),
         token_program_a: kb(token_program_a.address()),
         system_program: kb(system_program.address()),
     };
@@ -213,7 +218,7 @@ fn make(program_id: &Address, accounts: &mut [AccountView], args: &pw::MakeArgs)
         let ix = InstructionView { program_id: tp.address(), accounts: &metas, data: &[IX_INITIALIZE_MULTISIG2, plan.vault_auth.m] };
         invoke(&ix, &[vault_auth, s0, s1, s2])?;
     }
-    // 3) fund the vault from the maker's own account, and pay the make fee
+    // 3) fund the vault from the maker's own account, and pay the make fee in DREGG
     exec_transfer(ro, &plan.fund, None)?;
     exec_transfer(ro, &plan.fee, None)?;
     // 4) write the verified record; the plan borrows the facts, so take its bytes by copy first
@@ -246,9 +251,16 @@ fn take(program_id: &Address, accounts: &mut [AccountView], args: pw::TakeArgs) 
     let ms = read_multisig(vault_auth)?;
     let t_vault = read_tok(vault, vault_auth.address(), mint_a.address(), mint_a.owner())?;
     let t_pa = read_tok(payer_ata_a, payer.address(), mint_a.address(), mint_a.owner())?;
-    let t_pb = read_tok(payer_ata_b, payer.address(), mint_b.address(), mint_b.owner())?;
-    let t_mb = read_tok(maker_ata_b, maker.address(), mint_b.address(), mint_b.owner())?;
-    let t_fb = read_tok(fee_ata_b, &FEE_RECIPIENT, mint_b.address(), mint_b.owner())?;
+    // the payment side exists only when the taker pays; a free claim never touches those accounts
+    let side = if args.pay_b > 0 {
+        Some((read_tok(payer_ata_b, payer.address(), mint_b.address(), mint_b.owner())?,
+              read_tok(maker_ata_b, maker.address(), mint_b.address(), mint_b.owner())?,
+              read_tok(fee_ata_b, &FEE_RECIPIENT, mint_b.address(), mint_b.owner())?))
+    } else { None };
+    let pay_side = match &side {
+        Some((t_pb, t_mb, t_fb)) => Some(pw::PaySide { mint_b: mint_facts(mint_b)?, payer_ata_b: tok_facts(payer_ata_b, t_pb), maker_ata_b: tok_facts(maker_ata_b, t_mb), fee_ata_b: tok_facts(fee_ata_b, t_fb), token_program_b: kb(token_program_b.address()) }),
+        None => None,
+    };
     let facts = pw::TakeFacts {
         args,
         offer: offer_facts(offer, &ob, program_id),
@@ -257,14 +269,10 @@ fn take(program_id: &Address, accounts: &mut [AccountView], args: pw::TakeArgs) 
         maker_key: kb(maker.address()),
         vault_auth: ms_facts(vault_auth, &ms),
         mint_a: mint_facts(mint_a)?,
-        mint_b: mint_facts(mint_b)?,
         vault: tok_facts(vault, &t_vault),
         payer_ata_a: tok_facts(payer_ata_a, &t_pa),
-        payer_ata_b: tok_facts(payer_ata_b, &t_pb),
-        maker_ata_b: tok_facts(maker_ata_b, &t_mb),
-        fee_ata_b: tok_facts(fee_ata_b, &t_fb),
+        pay_side,
         token_program_a: kb(token_program_a.address()),
-        token_program_b: kb(token_program_b.address()),
     };
     let plan = pw::decide_take(&facts).ok_or(Err::Refused)?;
 
@@ -272,8 +280,7 @@ fn take(program_id: &Address, accounts: &mut [AccountView], args: pw::TakeArgs) 
     let bump = [plan.offer.bump];
     let seeds = [Seed::from(abi::OFFER_PDA_SEED.as_bytes()), Seed::from(plan.offer.maker), Seed::from(&seed_le), Seed::from(&bump)];
     let s = Signer::from(&seeds);
-    exec_transfer(ro, &plan.pay, None)?;
-    exec_transfer(ro, &plan.fee, None)?;
+    if plan.pays { exec_transfer(ro, &plan.pay, None)?; exec_transfer(ro, &plan.fee, None)?; }
     exec_transfer(ro, &plan.release, Some(&s))?;
     if !plan.closes { return Ok(()); }  // a partial take: the offer stays open with the rest of the vault
     exec_close(ro, &plan.close_vault, &s)?;

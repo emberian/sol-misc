@@ -38,8 +38,8 @@
 
   <h2 id="how">how it works</h2>
   <ul>
-    <li id="make"><b>make:</b> deposit token A. name the least token B you'll take for all of it. that's a rate. pick a passphrase.</li>
-    <li id="claim"><b>claim:</b> type the passphrase. take any amount up to what's left. pay at least the rate. one transaction, all or nothing.</li>
+    <li id="make"><b>make:</b> deposit token A. name the least token B you'll take for all of it; that's a rate, and 0 makes a free offer. pick a passphrase. posting costs 1000 DREGG.</li>
+    <li id="claim"><b>claim:</b> type the passphrase. take any amount up to what's left. pay at least the rate, or nothing if the offer is free. one transaction, all or nothing.</li>
     <li id="cancel"><b>cancel:</b> the maker takes back what's left, after any no-cancel-before time.</li>
     <li><b>to buy instead:</b> deposit the token you pay with. same rule, other direction.</li>
     <li>partial claims keep the offer open. emptying it closes it. paying above the rate is fine.</li>
@@ -66,7 +66,7 @@
     <tr><td>your account for a new token ~0.002</td><td>you</td><td>stays yours</td></tr>
     <tr><td>fee account for a new token ~0.002</td><td>first fee payer in that token</td><td>stays with that account</td></tr>
   </table>
-  <p class="dim">the pages list each of these before you sign. the make fee is not refunded on cancel.</p>
+  <p class="dim">the pages list each of these before you sign. the make fee is not refunded on cancel. a free claim needs no account for token B at all.</p>
 
   <h2 id="chain">on chain</h2>
   <div class="box" id="derivations">loading…</div>
@@ -82,10 +82,11 @@
     <li>no claim without the recorded key's signature.</li>
     <li>the maker gets the payment in full, and it clears the rate.</li>
     <li>the claimer gets exactly what they asked for, never more than the vault holds.</li>
-    <li>each fee is exactly the rate, never more, only to the fee wallet.</li>
+    <li>the make fee is exactly 1000 DREGG; the take fee is exactly the rate on the payment, never more; a free claim pays none. only to the fee wallet.</li>
     <li>the program never moves a vault on its own signature.</li>
     <li>only the maker cancels, only after the no-cancel time, for exactly what's left.</li>
     <li>a closed offer admits nothing. no double claim.</li>
+    <li>a claim that pays nothing is admitted only for a free offer.</li>
     <li>a legitimate claim, cancel or make is never refused.</li>
   </ol>
   <p class="dim">trusted, not proved: the 300-line adapter, the SPL token programs, the runtime.</p>
@@ -124,7 +125,7 @@ spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   document.getElementById("kdf").innerHTML = `<b>${esc(abi.claim_kdf.name)}</b>, ${abi.claim_kdf.rounds.toLocaleString()} rounds, salt <code>${esc(abi.claim_kdf.salt)}</code> + offer address → seed of an ${esc(abi.claim_kdf.key)}.<br><span class="dim">words are normalized first: NFKC, trimmed, lower-cased, single-spaced.</span>`;
-  document.getElementById("fee").innerHTML = `<b>${esc(abi.fee.percent)}%</b> (${abi.fee.num}/${abi.fee.den.toLocaleString()}, rounded down), twice:<br>make: on the deposit, in token A, from the maker, on top.<br>claim: on the payment, in token B, from the claimer, on top.<br>to <code class="mono">${esc(abi.fee.recipient)}</code>. no fee on cancel.`;
+  document.getElementById("fee").innerHTML = `make: <b>${esc(abi.fee.make.display)}</b>, flat, from ${esc(abi.fee.make.from)}, whatever token is offered. not refunded on cancel.<br>claim: <b>${esc(abi.fee.take.percent)}%</b> of the payment (${abi.fee.take.num}/${abi.fee.take.den.toLocaleString()}, rounded down), in token B, from the claimer, on top. a free claim pays none.<br>to <code class="mono">${esc(abi.fee.recipient)}</code>. no fee on cancel.`;
   document.getElementById("derivations").innerHTML = `offer record: PDA <code>[${abi.offer.pda_seeds.map(esc).join(", ")}]</code><br>vault authority: PDA <code>[${abi.vault_auth.pda_seeds.map(esc).join(", ")}]</code>, an SPL multisig, ${abi.vault_auth.multisig.m} of <code>[${abi.vault_auth.multisig.signers.map(esc).join(", ")}]</code><br>vault: ${esc(abi.vault_auth.vault)}<br>token programs: <span class="mono">${esc(abi.programs.token)}</span>, <span class="mono">${esc(abi.programs.token_2022)}</span>`;
   const tbl = document.getElementById("offerFields");
   for (const f of abi.offer.fields) tbl.insertAdjacentHTML("beforeend", `<tr><td>${esc(f.name)}</td><td>${f.offset}</td><td>${f.len}</td><td>${esc(f.kind)}</td></tr>`);

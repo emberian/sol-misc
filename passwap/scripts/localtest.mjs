@@ -21,7 +21,7 @@ const mintA = new web3.PublicKey(mintAStr), mintB = new web3.PublicKey(mintBStr)
 const pw = makePasswap(web3, nacl, programId, abi);
 const tpA = pw.P.token2022, tpB = pw.P.token;
 const decA = (await conn.getAccountInfo(mintA)).data[44];
-const FEE = pw.FEE_RECIPIENT;
+const FEE = pw.FEE_RECIPIENT, DREGG = pw.DREGG_MINT, MAKE_FEE = pw.MAKE_FEE, tp22 = pw.P.token2022;
 
 const bal = async (owner, mint, tp) => { try { return BigInt((await conn.getTokenAccountBalance(pw.ata(owner, mint, tp))).value.amount); } catch { return 0n; } };
 const send = async (ixs, signers) => {
@@ -42,11 +42,11 @@ const makeOffer = async (seed, phrase, amountA, amountB, notBefore = 0n) => {
   const claim = await pw.deriveClaimKeypair(phrase, offer);
   const claimKp = web3.Keypair.fromSecretKey(claim.secretKey);
   const { ix, vaultAuth } = pw.ixMake({ maker: maker.publicKey, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: claimKp.publicKey, notBefore });
-  const makerA0 = await bal(maker.publicKey, mintA, tpA), feeA0 = await bal(FEE, mintA, tpA);
-  await send([pw.ixCreateAtaIdempotent(maker.publicKey, vaultAuth, mintA, tpA), pw.ixCreateAtaIdempotent(maker.publicKey, FEE, mintA, tpA), ix], [maker]);
-  const feeA = pw.feeOf(amountA);
-  assert((await bal(maker.publicKey, mintA, tpA)) === makerA0 - amountA - feeA, "maker paid exactly the deposit plus the make fee");
-  assert((await bal(FEE, mintA, tpA)) === feeA0 + feeA, "fee recipient received exactly the make fee");
+  const makerA0 = await bal(maker.publicKey, mintA, tpA), makerD0 = await bal(maker.publicKey, DREGG, tp22), feeD0 = await bal(FEE, DREGG, tp22);
+  await send([pw.ixCreateAtaIdempotent(maker.publicKey, vaultAuth, mintA, tpA), pw.ixCreateAtaIdempotent(maker.publicKey, FEE, DREGG, tp22), ix], [maker]);
+  assert((await bal(maker.publicKey, mintA, tpA)) === makerA0 - amountA, "maker paid exactly the deposit in mint A");
+  assert((await bal(maker.publicKey, DREGG, tp22)) === makerD0 - MAKE_FEE, "maker paid exactly 1000 DREGG");
+  assert((await bal(FEE, DREGG, tp22)) === feeD0 + MAKE_FEE, "fee recipient received exactly 1000 DREGG");
   return { offer, claimKp, vaultAuth, vault: pw.ata(vaultAuth, mintA, tpA) };
 };
 
@@ -87,7 +87,7 @@ console.log("before: maker A", await bal(maker.publicKey, mintA, tpA), "| payer 
   assert((await bal(maker.publicKey, mintB, tpB)) === makerB0 + AMOUNT_B, "maker received exactly B");
   assert((await bal(FEE, mintB, tpB)) === fee0 + fee, "fee recipient received exactly the fee");
   assert((await bal(payer.publicKey, mintB, tpB)) === payerB0 - AMOUNT_B - fee, "payer paid exactly B + fee");
-  console.log(`after take: payer A ${await bal(payer.publicKey, mintA, tpA)} | maker B ${await bal(maker.publicKey, mintB, tpB)} | take fee ${fee} (${abi.fee.percent}%)`);
+  console.log(`after take: payer A ${await bal(payer.publicKey, mintA, tpA)} | maker B ${await bal(maker.publicKey, mintB, tpB)} | take fee ${fee} (${abi.fee.take.percent}%)`);
 }
 // ---- offer 2: make then cancel
 {
@@ -132,15 +132,17 @@ console.log("before: maker A", await bal(maker.publicKey, mintA, tpA), "| payer 
   await mustFail("take paying nothing", [rawTake(base, 1n, 0n)], [payer, claimKp]);
   {
     const [offer10] = pw.offerPda(maker.publicKey, S(10)); const va10 = pw.vaultAuth(offer10);
-    const named = { maker: maker.publicKey, offer: offer10, claim_key: claimKp.publicKey, vault_auth: va10, mint_a: mintA, maker_ata_a: pw.ata(maker.publicKey, mintA, tpA), vault: pw.ata(va10, mintA, tpA), fee_ata_a: pw.ata(stranger.publicKey, mintA, tpA), token_program_a: tpA, system_program: pw.P.system };
+    const named = { maker: maker.publicKey, offer: offer10, claim_key: claimKp.publicKey, vault_auth: va10, mint_a: mintA, maker_ata_a: pw.ata(maker.publicKey, mintA, tpA), vault: pw.ata(va10, mintA, tpA), dregg_mint: DREGG, maker_dregg: pw.ata(maker.publicKey, DREGG, tp22), fee_dregg: pw.ata(stranger.publicKey, DREGG, tp22), token_program_a: tpA, token_program_2022: tp22, system_program: pw.P.system };
     const args = { seed: S(10), amount_a: 1_000_000n, amount_b: 1n, claim_key: claimKp.publicKey, mint_b: mintB, not_before: 0n };
+    await send([pw.ixCreateAtaIdempotent(maker.publicKey, stranger.publicKey, DREGG, tp22)], [maker]);
     await mustFail("make routing the make fee to the attacker", [pw.ixCreateAtaIdempotent(maker.publicKey, va10, mintA, tpA), rawMake(args, named)], [maker]);
+    await mustFail("free-riding a priced offer (pay_b = 0)", [rawTake(base, 1n, 0n)], [payer, claimKp]);
   }
   await send([rawTake(base)], [payer, claimKp]);
   await mustFail("second take of a taken offer", [rawTake(base)], [payer, claimKp]);
   const [offer5] = pw.offerPda(maker.publicKey, S(5));
   const z = pw.ixMake({ maker: maker.publicKey, seed: S(5), mintA, tokenProgramA: tpA, mintB, amountA: 0n, amountB: 1n, claimKey: claimKp.publicKey });
-  await mustFail("make with a zero amount", [pw.ixCreateAtaIdempotent(maker.publicKey, z.vaultAuth, mintA, tpA), z.ix], [maker]);
+  await mustFail("make with a zero deposit", [pw.ixCreateAtaIdempotent(maker.publicKey, z.vaultAuth, mintA, tpA), z.ix], [maker]);
   const m = pw.ixMake({ maker: maker.publicKey, seed: S(6), mintA, tokenProgramA: tpA, mintB, amountA: 1n, amountB: 1n, claimKey: maker.publicKey });
   await mustFail("make whose claim key is the maker", [pw.ixCreateAtaIdempotent(maker.publicKey, m.vaultAuth, mintA, tpA), m.ix], [maker]);
   void offer5;
@@ -168,6 +170,20 @@ console.log("before: maker A", await bal(maker.publicKey, mintA, tpA), "| payer 
   await take9(3_000_000n); assert((await conn.getAccountInfo(r.offer)) !== null, "open after 3/4");
   await take9(1_000_000n); assert((await conn.getAccountInfo(r.offer)) === null && (await conn.getAccountInfo(r.vault)) === null, "closed when emptied");
   console.log("partial takes: the last one closed the vault and the offer");
+}
+// ---- free offers: price 0, claimed for free by a wallet that holds no mint B at all, no fee
+{
+  const { offer, claimKp, vault } = await makeOffer(S(11), "free phrase here", 2_000_000n, 0n);
+  const o = pw.readOffer((await conn.getAccountInfo(offer)).data); assert(o.amountB === 0n, "free offer recorded");
+  const guest = web3.Keypair.generate();
+  await conn.confirmTransaction(await conn.requestAirdrop(guest.publicKey, 1_000_000_000), "confirmed");
+  const feeB0 = await bal(FEE, mintB, tpB);
+  await send([pw.ixCreateAtaIdempotent(guest.publicKey, guest.publicKey, mintA, tpA), pw.ixTake({ claimKey: claimKp.publicKey, payer: guest.publicKey, maker: maker.publicKey, offer, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB, takeA: 2_000_000n, payB: 0n })], [guest, claimKp]);
+  assert((await bal(guest.publicKey, mintA, tpA)) === 2_000_000n, "guest received the gift");
+  assert((await conn.getAccountInfo(offer)) === null && (await conn.getAccountInfo(vault)) === null, "free offer closed");
+  assert((await bal(FEE, mintB, tpB)) === feeB0, "no take fee on a free claim");
+  assert((await conn.getAccountInfo(pw.ata(guest.publicKey, mintB, tpB))) === null, "the guest never needed a mint B account");
+  console.log("free offer: made at price 0, claimed for free by a wallet with no mint B account, no fee");
 }
 // ---- custody: the program is one of three keys. Alone, no single party can move the vault; maker + claimer can, with no program at all.
 {

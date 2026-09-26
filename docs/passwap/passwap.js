@@ -6,7 +6,8 @@
 //   pw.offerPda(maker, seed)                        -> [PublicKey, bump], per abi.offer.pda_seeds
 //   pw.vaultAuth(offer)                             -> PublicKey, the vault's 2-of-3 multisig, per abi.vault_auth.pda_seeds
 //   pw.ata(owner, mint, tokenProgram)               -> PublicKey
-//   pw.feeOf(amount)                                -> bigint, per abi.fee (charged on the deposit at make, on the payment at take)
+//   pw.feeOf(payB)                                  -> bigint, the take fee per abi.fee.take (0 for a free claim)
+//   pw.MAKE_FEE, pw.DREGG_MINT                      -> the flat make fee in DREGG base units, and the DREGG mint
 //   pw.priceFor(offer, takeA)                       -> bigint, the smallest payment that clears the offer's rate for takeA
 //   pw.ixCreateAtaIdempotent(payer, owner, mint, tokenProgram)
 //   pw.ixMake({maker, seed, mintA, tokenProgramA, mintB, amountA, amountB, claimKey, notBefore}) -> {offer, vaultAuth, ix}
@@ -28,6 +29,7 @@
     const PROGRAM_ID = new PublicKey(programIdStr);
     const P = { token: new PublicKey(abi.programs.token), token2022: new PublicKey(abi.programs.token_2022), ata: new PublicKey(abi.programs.associated_token), system: new PublicKey(abi.programs.system) };
     const FEE_RECIPIENT = new PublicKey(abi.fee.recipient);
+    const DREGG_MINT = new PublicKey(abi.fee.make.mint), MAKE_FEE = BigInt(abi.fee.make.amount);
     const subtle = (typeof crypto !== "undefined" && crypto.subtle) ? crypto.subtle : require("node:crypto").webcrypto.subtle;
     const enc = new TextEncoder();
 
@@ -82,7 +84,7 @@
     const offerPda = (maker, seed) => PublicKey.findProgramAddressSync(seedBytes(abi.offer.pda_seeds, { maker, seed }), PROGRAM_ID);
     const vaultAuth = (offer) => PublicKey.findProgramAddressSync(seedBytes(abi.vault_auth.pda_seeds, { offer }), PROGRAM_ID)[0];
     const ata = (owner, mint, tokenProgram) => PublicKey.findProgramAddressSync([owner.toBytes(), tokenProgram.toBytes(), mint.toBytes()], P.ata)[0];
-    const feeOf = (amount) => BigInt(amount) * BigInt(abi.fee.num) / BigInt(abi.fee.den);
+    const feeOf = (payB) => BigInt(payB) * BigInt(abi.fee.take.num) / BigInt(abi.fee.take.den);
     // the least pay_b with pay_b * amount_a >= amount_b * take_a
     const priceFor = (o, takeA) => { const n = BigInt(o.amountB) * BigInt(takeA), d = BigInt(o.amountA); return (n + d - 1n) / d; };
 
@@ -105,7 +107,7 @@
       const [offer] = offerPda(maker, seed);
       const va = vaultAuth(offer);
       const data = encodeArgs("make", { seed, amount_a: amountA, amount_b: amountB, claim_key: claimKey, mint_b: mintB, not_before: notBefore });
-      const ix = buildIx("make", data, { maker, offer, claim_key: claimKey, vault_auth: va, mint_a: mintA, maker_ata_a: ata(maker, mintA, tokenProgramA), vault: ata(va, mintA, tokenProgramA), fee_ata_a: ata(FEE_RECIPIENT, mintA, tokenProgramA), token_program_a: tokenProgramA, system_program: P.system });
+      const ix = buildIx("make", data, { maker, offer, claim_key: claimKey, vault_auth: va, mint_a: mintA, maker_ata_a: ata(maker, mintA, tokenProgramA), vault: ata(va, mintA, tokenProgramA), dregg_mint: DREGG_MINT, maker_dregg: ata(maker, DREGG_MINT, P.token2022), fee_dregg: ata(FEE_RECIPIENT, DREGG_MINT, P.token2022), token_program_a: tokenProgramA, token_program_2022: P.token2022, system_program: P.system });
       return { offer, vaultAuth: va, ix };
     }
     function ixTake({ claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB, takeA, payB }) {
@@ -131,6 +133,6 @@
         { pubkey: authority, isSigner: false, isWritable: false }, ...signers.map((s) => ({ pubkey: s, isSigner: true, isWritable: false }))];
       return new TransactionInstruction({ programId: tokenProgram, data: new Uint8Array([9]), keys });
     }
-    return { PROGRAM_ID, P, FEE_RECIPIENT, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, priceFor, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
+    return { PROGRAM_ID, P, FEE_RECIPIENT, DREGG_MINT, MAKE_FEE, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, priceFor, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
   };
 });

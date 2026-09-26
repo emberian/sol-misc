@@ -25,12 +25,13 @@ Vault owner: SPL multisig, 2 of `[offer PDA, maker, claim key]`. The program sig
 |---|---|---|
 | P1 | No take without the claim key's signature. | `take_needs_the_claim_signature` |
 | P2 | The claim key that must sign is the one recorded in the offer. | `take_checks_the_recorded_claim_key` |
-| P3 | The maker receives the taker's payment in full, from the taker's own account into the maker's own account for that mint, and the payment clears the offer's rate: `pay_b · amount_a ≥ amount_b · take_a`. Taking everything at the exact price is the special case, and then `pay_b ≥ amount_b`. A taker may pay more than the rate, never less. | `take_pays_at_least_the_rate` |
+| P3 | When the taker pays, the maker receives the payment in full, from the taker's own account into the maker's own account for that mint, and the payment clears the offer's rate: `pay_b · amount_a ≥ amount_b · take_a`. Taking everything at the exact price is the special case, and then `pay_b ≥ amount_b`. A taker may pay more than the rate, never less. | `take_pays_at_least_the_rate` |
+| P17 | A take that pays nothing is admitted only for a free offer (price 0), and then the plan moves nothing on the payment side and charges no fee. A free claim needs no token-B accounts. | `free_offers_are_claimed_for_free` |
 | P4 | The claimer receives exactly what they asked to take, never more than the vault holds, into their own account for that mint, out of the vault. | `take_releases_exactly_what_was_taken` |
 | P16 | A take closes the vault and the offer exactly when it empties the vault; a partial take leaves the offer open with the rest. | `offers_close_exactly_when_emptied` |
 | P5 | The only authorities a take uses are the claimer over the claimer's own account and the vault's multisig over the vault. | `take_moves_only_the_parties_own_funds` |
 | P6 | The offer account's rent goes back to the maker. | `take_refunds_rent_to_the_maker` |
-| P14 | Each fee is exactly `fee_of(x) = x · 88 / 100000` of what it is charged on (the payment at take, the deposit at make), never more than that amount, from the payer's own account to the fee recipient's own account for that mint. | `fees_are_exactly_the_rate` |
+| P14 | The take fee is exactly `fee_of(pay_b) = pay_b · 88 / 100000`, never more than the payment, from the taker's own account to the fee recipient's account for that mint, and zero for a free claim. The make fee is exactly `MAKE_FEE` = 1000 DREGG, from the maker's own DREGG account to the fee recipient's DREGG account, whatever token is offered. | `fees_are_exactly_the_rate` |
 | P11 | A legitimate take is never refused. | `decide_take`, the `None` arm |
 
 ## Cancel
@@ -58,9 +59,10 @@ Vault owner: SPL multisig, 2 of `[offer PDA, maker, claim key]`. The program sig
 
 | after a … | at key k, the balance changes by | theorem |
 |---|---|---|
-| take | −(pay_b + fee) at the claimer's B account, +pay_b at the maker's B account, +fee at the fee recipient's B account, −take_a at the vault, +take_a at the claimer's A account, 0 elsewhere | `theorem_take_effect` |
+| take, paying | −(pay_b + fee) at the claimer's B account, +pay_b at the maker's B account, +fee at the fee recipient's B account, −take_a at the vault, +take_a at the claimer's A account, 0 elsewhere | `theorem_take_effect` |
+| take, free | −take_a at the vault, +take_a at the claimer's A account, 0 elsewhere | `theorem_free_take_effect` |
 | cancel | −remainder at the vault, +remainder at the maker's A account, 0 elsewhere | `theorem_cancel_effect` |
-| make | −(deposit + fee) at the maker's A account, +deposit at the vault, +fee at the fee recipient's A account, 0 elsewhere | `theorem_make_effect` |
+| make | −deposit at the maker's A account, +deposit at the vault, −1000 DREGG at the maker's DREGG account, +1000 DREGG at the fee recipient's DREGG account, 0 elsewhere | `theorem_make_effect` |
 
 Signed and per key, so they hold even when two named accounts coincide. Conservation follows.
 
@@ -86,7 +88,7 @@ Signed and per key, so they hold even when two named accounts coincide. Conserva
 
 - **Closing the program strands no funds** (P13; localtest recovers a vault with raw token instructions). It does stop the normal flow, and each open offer's own rent (~0.002 SOL) stays parked. The deploy page lists open offers and asks.
 - **Upgrade authority** can replace the code, not the custody rule (P12). Authority none = immutable; parks 0.43 SOL.
-- **Fee recipient** is a compiled-in constant. Fee accounts are created by the first fee payer per mint; closing an emptied one returns that rent to the recipient.
+- **Fee recipient** and the **DREGG mint** are compiled-in constants. The make fee always lands in the recipient's DREGG account; take fees land per mint B, in accounts created by the first fee payer for that mint; closing an emptied one returns that rent to the recipient.
 
 ## Negative tests
 
@@ -106,8 +108,9 @@ Signed and per key, so they hold even when two named accounts coincide. Conserva
 | cancel before `not_before` | P7: `now >= not_before` |
 | take paying below the rate | `take_conditions`: `clears_rate` |
 | take of more than the vault holds, of nothing, or paying nothing | `take_conditions`: `0 < take_a ≤ vault.amount`, `pay_b > 0` |
-| make routing the make fee to the attacker | ATA check: the fee account's authority must be `FEE_RECIPIENT` |
-| make with a zero amount | `make_conditions`: both amounts positive |
+| make routing the make fee to the attacker | ATA check: the DREGG fee account's authority must be `FEE_RECIPIENT` |
+| make with a zero deposit | `make_conditions`: `amount_a > 0` (the price may be 0) |
+| free-riding a priced offer with `pay_b = 0` | `take_conditions`: `clears_rate` fails unless the price is 0 |
 | make whose claim key is the maker | `make_conditions`: the three keys must be distinct |
 | maker alone moving the vault with a raw token instruction | the token program: 1 of 2 required signatures |
 | claimer alone moving the vault with a raw token instruction | the token program: 1 of 2 required signatures |
