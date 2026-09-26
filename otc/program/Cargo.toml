@@ -1,0 +1,25 @@
+[package]
+name = "dregg-otc"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "A passphrase-claimable token escrow: the maker deposits token A and names a claim key; whoever holds that key pays token B and receives A, atomically."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+no-entrypoint = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-program = { version = "=3.0.0", default-features = false }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = 3
