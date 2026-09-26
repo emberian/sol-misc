@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>passwap explorer</title>
+<meta name="description" content="Open offers and recent activity of the passwap program, decoded in the browser from any Solana RPC.">
+<style>
+  :root { --bg:#0f0e13; --panel:#17161d; --ink:#e8e4f0; --soft:#a8a2b8; --dim:#5f5a70; --line:#2a2735; --ok:#79c98c; --warn:#e0b96a; --bad:#d98a7a; --accent:#a89fd8; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg:#f6f3ee; --panel:#fffdf9; --ink:#1d1a24; --soft:#4d4859; --dim:#8a849a; --line:#e2ddd4; --accent:#5c4fa8; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; color: var(--accent); margin: 28px 0 8px; }
+  .sub { color: var(--soft); margin: 0 0 16px; font-size: 13px; }
+  .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin: 12px 0; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; } .stat b { display:block; font-size: 20px; } .stat span { color: var(--dim); font-size: 12px; }
+  .wrap { overflow-x: auto; } table { border-collapse: collapse; width: 100%; font-size: 13px; } th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; } th { color: var(--dim); font-weight: normal; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .mono { font-size: 12px; } .dim { color: var(--dim); } .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .tag { display:inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); } .tag.make { color: var(--accent); } .tag.take { color: var(--ok); } .tag.cancel { color: var(--warn); }
+  button.ghost { background:transparent; color:var(--soft); border:1px solid var(--line); border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  #log { color: var(--soft); font-size: 12.5px; margin-top: 10px; min-height: 1.5em; }
+  footer { color:var(--dim); font-size:12px; margin-top:28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>passwap · explorer</h1>
+  <p class="sub">what this program has been doing, decoded in your browser straight from an RPC. no indexer, no server. <span id="rpcNote"></span></p>
+  <div class="stats">
+    <div class="stat"><b id="sOpen">…</b><span>open offers</span></div>
+    <div class="stat"><b id="sMakes">…</b><span>offers made <em id="sWindow"></em></span></div>
+    <div class="stat"><b id="sTakes">…</b><span>claims</span></div>
+    <div class="stat"><b id="sCancels">…</b><span>cancels</span></div>
+    <div class="stat"><b id="sFees">…</b><span>fees collected, by token</span></div>
+  </div>
+  <h2>open offers</h2>
+  <div class="wrap"><table id="offers"><tr><th>offer</th><th>maker</th><th>gives</th><th>available</th><th>wants, per unit given</th><th>maker can cancel</th><th></th></tr></table></div>
+  <h2>recent activity</h2>
+  <div class="wrap"><table id="activity"><tr><th>when</th><th>what</th><th>offer</th><th>who</th><th>amounts</th><th>tx</th></tr></table></div>
+  <p><button class="ghost" id="more">load older</button> <button class="ghost" id="refresh">refresh</button></p>
+  <div id="log"></div>
+  <footer>program <span class="mono" id="programId"></span> · rpc <span id="rpcName"></span> · <a href="index.html" style="color:var(--dim)">claim / make</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
+</main>
+
+<script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
+<script src="https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js"></script>
+<script src="passwap.js"></script>
+<script>
+(async function () {
+  const web3 = solanaWeb3, PublicKey = web3.PublicKey;
+  const q = new URLSearchParams(location.search);
+  const PROGRAM_ID = q.get("program") || "7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6";
+  const RPC = q.get("rpc") || "https://api.mainnet-beta.solana.com";
+  const PAGE = 25;
+  const conn = new web3.Connection(RPC, "confirmed");
+  const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
+  const pw = makePasswap(web3, nacl, PROGRAM_ID, abi);
+  const $ = (id) => document.getElementById(id);
+  const log = (m, cls = "") => { $("log").innerHTML = `<span class="${cls}">${m}</span>`; };
+  $("programId").textContent = PROGRAM_ID; $("rpcName").textContent = new URL(RPC).host;
+  if (!q.get("rpc")) $("rpcNote").textContent = "the default public RPC is rate-limited; add ?rpc=… to use your own.";
+  const explorerTx = (s) => `https://solscan.io/tx/${s}`, explorerAcc = (a) => `https://solscan.io/account/${a}`;
+  const short = (k) => { const s = k.toString(); return `<a class="mono" href="${explorerAcc(s)}" title="${s}">${s.slice(0, 4)}…${s.slice(-4)}</a>`; };
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const fmt = (amount, dec) => { const s = BigInt(amount).toString().padStart(dec + 1, "0"); return (s.slice(0, -dec) + "." + s.slice(-dec)).replace(/\.?0+$/, "") || "0"; };
+  const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const b58decode = (s) => { let n = 0n; for (const c of s) n = n * 58n + BigInt(B58.indexOf(c)); const out = []; while (n > 0n) { out.push(Number(n & 0xffn)); n >>= 8n; } for (const c of s) { if (c !== "1") break; out.push(0); } return Uint8Array.from(out.reverse()); };
+  const readU64 = (b, i) => { let v = 0n; for (let k = 7; k >= 0; k--) v = (v << 8n) | BigInt(b[i + k]); return v; };
+  const decodeArgs = (fields, bytes) => { const o = {}; for (const f of fields) { if (f.kind === "u8") o[f.name] = bytes[f.offset]; else if (f.kind === "u64le") o[f.name] = readU64(bytes, f.offset); else if (f.kind === "pubkey") o[f.name] = new PublicKey(bytes.slice(f.offset, f.offset + 32)); } return o; };
+  const idx = (ix, name) => abi.instructions[ix].accounts.findIndex((a) => a.name === name);
+  const tagName = Object.fromEntries(Object.entries(abi.instructions).map(([n, i]) => [i.tag, n]));
+
+  // ---- mint decimals, batched and cached
+  const decimals = new Map();
+  async function loadDecimals(mints) {
+    const need = [...new Set(mints.map((m) => m.toString()))].filter((m) => !decimals.has(m));
+    for (let i = 0; i < need.length; i += 100) {
+      const chunk = need.slice(i, i + 100);
+      const infos = await conn.getMultipleAccountsInfo(chunk.map((m) => new PublicKey(m)));
+      chunk.forEach((m, j) => decimals.set(m, infos[j] ? infos[j].data[44] : 0));
+    }
+  }
+  const dec = (mint) => decimals.get(mint.toString()) ?? 0;
+  const amt = (a, mint) => `${fmt(a, dec(mint))} ${short(mint)}`;
+
+  // ---- open offers: every account of the offer record's size under the program
+  async function loadOffers() {
+    const accts = await conn.getProgramAccounts(new PublicKey(PROGRAM_ID), { filters: [{ dataSize: abi.offer.len }] });
+    const offers = []; for (const a of accts) { try { offers.push({ addr: a.pubkey, o: pw.readOffer(a.account.data) }); } catch {} }
+    await loadDecimals(offers.flatMap(({ o }) => [o.mintA, o.mintB]));
+    // vault balances in one call; a missing vault means the parties recovered it without the program
+    const tp = new Map(); for (const { o } of offers) if (!tp.has(o.mintA.toString())) tp.set(o.mintA.toString(), null);
+    const mintInfos = await conn.getMultipleAccountsInfo([...tp.keys()].map((m) => new PublicKey(m)));
+    [...tp.keys()].forEach((m, i) => tp.set(m, mintInfos[i] ? mintInfos[i].owner : pw.P.token));
+    const vaults = offers.map(({ o }) => pw.ata(o.vaultAuth, o.mintA, tp.get(o.mintA.toString())));
+    const vinfos = vaults.length ? await conn.getMultipleAccountsInfo(vaults) : [];
+    const tbl = $("offers"); tbl.querySelectorAll("tr:not(:first-child)").forEach((r) => r.remove());
+    let open = 0;
+    offers.sort((a, b) => Number(b.o.seed - a.o.seed));
+    offers.forEach(({ addr, o }, i) => {
+      const v = vinfos[i]; const avail = v ? readU64(v.data, 64) : null; if (avail !== null && avail > 0n) open++;
+      const status = avail === null ? `<span class="dim">vault closed by the parties</span>` : `${fmt(avail, dec(o.mintA))}${avail < o.amountA ? ` <span class="dim">of ${fmt(o.amountA, dec(o.mintA))}</span>` : ""}`;
+      const nb = o.notBefore > 0n ? new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time";
+      tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${fmt(o.amountB, dec(o.mintB))} / ${fmt(o.amountA, dec(o.mintA))} ${short(o.mintB)}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
+    });
+    if (!offers.length) tbl.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="dim">no open offers</td></tr>`);
+    $("sOpen").textContent = open;
+  }
+
+  // ---- activity: transactions that touched the program, decoded by tag and by the abi's account tables
+  let before = null; const counts = { make: 0, take: 0, cancel: 0 }; const fees = new Map(); let rows = 0;
+  async function loadActivity(reset) {
+    if (reset) { before = null; counts.make = counts.take = counts.cancel = 0; fees.clear(); rows = 0; $("activity").querySelectorAll("tr:not(:first-child)").forEach((r) => r.remove()); }
+    const sigs = await conn.getSignaturesForAddress(new PublicKey(PROGRAM_ID), { limit: PAGE, before: before || undefined });
+    if (!sigs.length) { $("more").disabled = true; if (!rows) $("activity").insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="dim">no activity yet</td></tr>`); return; }
+    before = sigs[sigs.length - 1].signature;
+    const txs = []; for (let i = 0; i < sigs.length; i += 10) txs.push(...await conn.getParsedTransactions(sigs.slice(i, i + 10).map((s) => s.signature), { maxSupportedTransactionVersion: 0 }));
+    const items = [];
+    txs.forEach((tx, i) => {
+      if (!tx) return;
+      const ix = tx.transaction.message.instructions.find((x) => x.programId && x.programId.toString() === PROGRAM_ID && x.data);
+      if (!ix) return;
+      const data = b58decode(ix.data); const name = tagName[data[0]]; if (!name) return;
+      const args = decodeArgs(abi.instructions[name].args, data.slice(1));
+      const acc = (n) => ix.accounts[idx(name, n)];
+      const item = { sig: sigs[i].signature, time: sigs[i].blockTime, name, ok: !sigs[i].err, offer: acc("offer"), args };
+      if (name === "make") Object.assign(item, { who: acc("maker"), mintA: acc("mint_a"), mintB: args.mint_b });
+      if (name === "take") Object.assign(item, { who: acc("payer"), mintA: acc("mint_a"), mintB: acc("mint_b") });
+      if (name === "cancel") Object.assign(item, { who: acc("maker"), mintA: acc("mint_a") });
+      if (item.ok && tx.meta) {
+        counts[name]++;
+        const pre = new Map((tx.meta.preTokenBalances || []).filter((b) => b.owner === pw.FEE_RECIPIENT.toString()).map((b) => [b.mint, BigInt(b.uiTokenAmount.amount)]));
+        for (const b of (tx.meta.postTokenBalances || []).filter((b) => b.owner === pw.FEE_RECIPIENT.toString())) { const d = BigInt(b.uiTokenAmount.amount) - (pre.get(b.mint) || 0n); if (d > 0n) fees.set(b.mint, (fees.get(b.mint) || 0n) + d); }
+      }
+      items.push(item);
+    });
+    await loadDecimals(items.flatMap((it) => [it.mintA, it.mintB].filter(Boolean)).concat([...fees.keys()].map((m) => new PublicKey(m))));
+    const tbl = $("activity");
+    for (const it of items) {
+      const when = it.time ? new Date(it.time * 1000).toLocaleString() : "";
+      let amounts = "";
+      if (it.name === "make") amounts = `${amt(it.args.amount_a, it.mintA)} for ≥ ${amt(it.args.amount_b, it.mintB)}${it.args.not_before > 0n ? ` <span class="dim">no cancel before ${new Date(Number(it.args.not_before) * 1000).toLocaleDateString()}</span>` : ""}`;
+      if (it.name === "take") amounts = `took ${amt(it.args.take_a, it.mintA)} for ${amt(it.args.pay_b, it.mintB)}`;
+      tbl.insertAdjacentHTML("beforeend", `<tr class="${it.ok ? "" : "dim"}"><td>${esc(when)}</td><td><span class="tag ${it.name}">${it.name}</span>${it.ok ? "" : ' <span class="bad">failed</span>'}</td><td>${short(it.offer)}</td><td>${short(it.who)}</td><td>${amounts}</td><td><a class="mono" href="${explorerTx(it.sig)}">${it.sig.slice(0, 8)}…</a></td></tr>`);
+      rows++;
+    }
+    $("sMakes").textContent = counts.make; $("sTakes").textContent = counts.take; $("sCancels").textContent = counts.cancel;
+    $("sWindow").textContent = `(last ${rows} txs)`;
+    $("sFees").innerHTML = fees.size ? [...fees].map(([m, d]) => `${fmt(d, dec(new PublicKey(m)))} ${short(new PublicKey(m))}`).join("<br>") : "0";
+    if (sigs.length < PAGE) $("more").disabled = true;
+  }
+  async function refresh() {
+    $("more").disabled = false; log("loading…");
+    try { await loadOffers(); await loadActivity(true); log(""); } catch (e) { log("rpc error: " + (e.message || e) + (q.get("rpc") ? "" : ". the public rpc rate-limits; try again or pass ?rpc="), "bad"); }
+  }
+  $("refresh").onclick = refresh; $("more").onclick = () => loadActivity(false).catch((e) => log("rpc error: " + (e.message || e), "bad"));
+  await refresh();
+  window.__explorerReady = true;
+})();
+</script>
+</body>
+</html>

@@ -1,29 +1,17 @@
-# What passwap proves, in plain words
+# What passwap proves
 
-Every line below names a theorem in `core/src/lib.rs` that Verus checks on every build
-(`verus core/src/lib.rs --crate-type lib`, currently 73 items, 0 errors). The names are the
-documentation; the bodies are one-line consequences of the decision specs. The user-facing
-version of this page, with the same guarantees in prose, is `docs/passwap/protocol.html`.
+Each row names a theorem in `core/src/lib.rs`. Verus checks all of them on every build: 73 items, 0 errors.
+User-facing version: `docs/passwap/protocol.html`.
 
-## The shape of the guarantee
+**Shape.** The core is pure: facts in, refusal or a plan out. The adapter gathers facts and executes the plan by CPI. Only the core is verified.
+For make, take and cancel: `*_conditions(facts)` and `*_plan_is(facts, plan)`, with two-sided postconditions.
 
-The program is split in two. The **core** is pure: given *facts* about the accounts a transaction
-presents, it either refuses or returns a *plan*, a fixed list of token moves. The core is verified.
-The **adapter** gathers the facts from the runtime and executes the plan by CPI, finding each
-account by key; it is small, tested end to end, and trusted.
-
-For each of make, take and cancel there is a predicate `*_conditions(facts)` and a predicate
-`*_plan_is(facts, plan)`. The decision functions carry two-sided postconditions:
-
-- **Soundness**: `Some(plan)` implies `*_conditions(facts)` and `*_plan_is(facts, plan)`. A plan
-  never exists unless the rules held, and its contents are fully determined.
-- **Completeness**: `None` implies `!*_conditions(facts)`. If the rules hold, the decision admits
-  the action. A legitimate claimer is never refused by the core.
+- **Sound**: `Some(plan)` ⟹ conditions held and the plan is exactly `*_plan_is`.
+- **Complete**: `None` ⟹ conditions did not hold. Legitimate actions are never refused.
 
 ## Custody
 
-The vault is owned by a 2-of-3 SPL token multisig of `[offer PDA, maker, claim key]`. The program
-signs as the PDA; every vault move also carries the maker's or the claimer's transaction signature.
+Vault owner: SPL multisig, 2 of `[offer PDA, maker, claim key]`. The program signs as the PDA; every vault move also carries a party's signature.
 
 | # | property | theorem |
 |---|---|---|
@@ -64,10 +52,9 @@ signs as the PDA; every vault move also carries the maker's or the claimer's tra
 |---|---|---|
 | P10 | A closed offer (no data) admits neither a take nor a cancel. There is no double take. | `closed_offers_are_dead` |
 
-## What a plan does to balances
+## Balances
 
-`Ledger` is an abstract map from token-account key to balance, and `apply_transfer` is the
-meaning of `transfer_checked`. The effect theorems give the signed change at *every* key:
+`Ledger`: key → balance. `apply_transfer` is `transfer_checked`. The effect theorems give the signed change at every key:
 
 | after a … | at key k, the balance changes by | theorem |
 |---|---|---|
@@ -75,8 +62,7 @@ meaning of `transfer_checked`. The effect theorems give the signed change at *ev
 | cancel | −remainder at the vault, +remainder at the maker's A account, 0 elsewhere | `theorem_cancel_effect` |
 | make | −(deposit + fee) at the maker's A account, +deposit at the vault, +fee at the fee recipient's A account, 0 elsewhere | `theorem_make_effect` |
 
-Because the deltas are signed and stated per key, the theorems hold even when two named accounts
-coincide, and conservation follows: the deltas of each transfer sum to zero.
+Signed and per key, so they hold even when two named accounts coincide. Conservation follows.
 
 ## Layout
 
@@ -87,45 +73,24 @@ coincide, and conservation follows: the deltas of each transfer sum to zero.
 | A multisig head parses only when it is exactly 99 bytes, and its fields are the bytes at fixed offsets. | `parse_multisig` |
 | The rate check and the fee are computed in u128 with proved bounds; the core cannot panic: every index, add, shift, multiplication, division and cast is discharged. | `check_rate`, `fee_amount`, all of it |
 
-## What is trusted, not proved
+## Trusted, not proved
 
-- **The adapter** (`program/src/lib.rs`, about 300 lines): that it derives the two PDAs and the
-  associated-token addresses with the runtime's syscalls, copies account bytes faithfully into
-  the fact buffers, reads signer flags and owners as the runtime reports them, creates and
-  initializes the multisig as the plan says, and issues exactly the CPIs the plan names. It
-  executes by key lookup, so it cannot substitute an account.
-- **The token programs**: SPL Token and Token-2022's `initialize_multisig2`, `transfer_checked`
-  and `close_account`, and in particular that a transfer whose authority is a multisig succeeds
-  only with `m` of its `n` signers present. P12 and P13 are statements about the plan; their force
-  comes from this semantics.
-- **The runtime**: the system program's `create_account`, rent, the clock, and PDA signing.
-- **Verus and vstd**: the verifier, and the handful of `external_body` specs it ships for slices,
-  arrays and little-endian bytes.
-- **The passphrase scheme** lives entirely in the client. The chain checks an Ed25519 signature
-  by the recorded claim key and nothing else. `abi.json` fixes the derivation (PBKDF2-SHA512,
-  600,000 rounds, salted with the offer address) so every client derives the same key.
-- **Distinctness of the three keys**: the core proves maker ≠ claim key. The offer PDA is
-  off-curve and the other two are wallet keys, so it differs from both; that is a fact about
-  PDAs, not something the core states.
+- **Adapter** (`program/src/lib.rs`, ~300 lines): derives the PDAs and ATAs via syscalls, copies account bytes into fact buffers, creates the multisig as planned, issues exactly the planned CPIs, by key lookup.
+- **Token programs**: `initialize_multisig2`, `transfer_checked`, `close_account`; a multisig authority needs `m` of `n` signers. P12 and P13 draw their force from this.
+- **Runtime**: `create_account`, rent, clock, PDA signing.
+- **Verus and vstd**: the verifier and its `external_body` specs for slices, arrays, LE bytes.
+- **Passphrase scheme**: client-only. The chain checks an Ed25519 signature by the recorded key. `abi.json` fixes the KDF.
+- **Key distinctness**: the core proves maker ≠ claim key. The PDA is off-curve, so it differs from both.
 
-## Operating the program
+## Operating
 
-- **Closing the program no longer strands funds.** Every open offer's vault can still be moved by
-  its maker and claimer together (P13, and `scripts/localtest.mjs` does exactly that with plain
-  token-program instructions). What closing does break is the normal claim and cancel flow, and
-  each open offer's own rent (about 0.002 SOL) stays parked, since only the program could close
-  the record. The deploy page lists open offers and asks before closing.
-- **Upgrade authority** can replace the program, which can break the flow but cannot move a vault:
-  P12 is a property of the custody structure, not of this version of the code. An authority of
-  none makes the program immutable and parks its rent (0.43 SOL for this binary) permanently.
-- **The fee recipient** is a compiled-in constant (`FEE_RECIPIENT`). Changing it is a new build. Fees
-  arrive in its associated token account per mint, created and paid for by the first person to pay a
-  fee in that mint; sweeping and closing an emptied one returns that rent to the recipient. No SOL
-  of the recipient's is ever needed.
+- **Closing the program strands no funds** (P13; localtest recovers a vault with raw token instructions). It does stop the normal flow, and each open offer's own rent (~0.002 SOL) stays parked. The deploy page lists open offers and asks.
+- **Upgrade authority** can replace the code, not the custody rule (P12). Authority none = immutable; parks 0.43 SOL.
+- **Fee recipient** is a compiled-in constant. Fee accounts are created by the first fee payer per mint; closing an emptied one returns that rent to the recipient.
 
 ## Negative tests
 
-`scripts/localtest.mjs` runs these against a local validator; each must be refused.
+`scripts/localtest.mjs`, against a local validator. Each is refused.
 
 | attack | what refuses it |
 |---|---|

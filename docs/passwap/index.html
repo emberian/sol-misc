@@ -38,7 +38,7 @@
 <body>
 <main>
   <h1>passwap</h1>
-  <p class="sub">a passphrase-claimable escrow on Solana. one offer, one passphrase, one atomic swap. custody is a 2-of-3 of {program, maker, claimer}, so nothing depends on this program staying alive. <a href="protocol.html" style="color:var(--accent)">how it works</a></p>
+  <p class="sub">escrow for a token swap where the counterparty is a passphrase. custody is a 2-of-3 of {program, maker, claimer}. <a href="protocol.html" style="color:var(--accent)">how it works</a></p>
 
   <section class="wallet">
     <span id="walletState">no wallet connected</span>
@@ -64,7 +64,7 @@
     <button class="primary" id="claimBtn" disabled>derive claim key</button>
     <button class="ghost" id="exportBtn" style="margin-top:8px" hidden>export claim keypair (for recovery)</button>
     <details><summary>what happens when you claim</summary>
-      your wallet pays the price plus a small fee to the maker's and the fee recipient's token accounts, and receives the escrowed tokens in the same transaction, which must also be signed by the claim key your browser derives from the passphrase (PBKDF2-SHA512, 600,000 rounds, salted with the offer address). the passphrase never leaves this page. if the passphrase is wrong the transaction is refused on chain and nothing moves. <a href="protocol.html#claim" style="color:var(--accent)">details</a></details>
+      one transaction, signed by your wallet and by the claim key derived here from the passphrase: you pay, the fee goes out, you receive. wrong passphrase: refused on chain, nothing moves. the passphrase never leaves this page. <a href="protocol.html#claim" style="color:var(--accent)">details</a></details>
   </section>
 
   <section id="paneMake" role="tabpanel" hidden>
@@ -85,7 +85,7 @@
     <button class="ghost" id="genPass" style="margin-top:8px">generate five words</button>
     <button class="primary" id="makeBtn" disabled>create offer</button>
     <details><summary>what happens when you create</summary>
-      your tokens move into a vault whose owner is a 2-of-3 multisig of {this program, you, the claim key}. the offer records the price, the two mints, and the claim key derived from the passphrase. anyone with the passphrase can claim by paying the price; you can cancel from this page and get the tokens back. if this program ever disappears, you and the claimer can still move the vault together. the passphrase itself is never stored anywhere. <a href="protocol.html#make" style="color:var(--accent)">details</a></details>
+      your tokens go into a vault owned by a 2-of-3 of {this program, you, the claim key}. whoever has the passphrase can claim at your rate; you can cancel here. if this program disappears, you and the claimer can still move the vault together. <a href="protocol.html#make" style="color:var(--accent)">details</a></details>
   </section>
 
   <section id="paneCancel" hidden>
@@ -95,7 +95,7 @@
   </section>
 
   <div id="log"></div>
-  <footer>program <span class="mono" id="programId"></span> · rpc <span id="rpcName"></span> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="deploy.html" style="color:var(--dim)">deploy</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
+  <footer>program <span class="mono" id="programId"></span> · rpc <span id="rpcName"></span> · <a href="explorer.html" style="color:var(--dim)">explorer</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="deploy.html" style="color:var(--dim)">deploy</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
 </main>
 
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
@@ -293,7 +293,7 @@
   }
   for (const id of ["mintA", "amountA"]) { $(id).addEventListener("change", makeQuote); $(id).addEventListener("blur", makeQuote); }
   $("tabMake").addEventListener("click", makeQuote);
-  $("makeFeeNote").textContent = `this sets a rate: a claimer may take part of the amount at no less than this price per unit, or all of it. to buy instead of sell, deposit the token you pay with and name the one you want as the token you receive. a ${abi.fee.percent}% fee on the amount you give is charged when the offer is created and is not refunded on cancel.`;
+  $("makeFeeNote").textContent = `this is a rate: a claimer can take part or all at no less than it. to buy instead of sell, deposit the token you pay with. a ${abi.fee.percent}% fee on the amount you give is charged now and not refunded on cancel.`;
   $("tabClaim").onclick = () => showTab("claim"); $("tabMake").onclick = () => showTab("make");
   $("offerAddr").addEventListener("change", loadOffer); $("offerAddr").addEventListener("blur", loadOffer);
   $("passphrase").addEventListener("input", refreshButtons);
