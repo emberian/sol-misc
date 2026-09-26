@@ -95,7 +95,7 @@
   </section>
 
   <div id="log"></div>
-  <footer>program <span class="mono" id="programId"></span> · rpc <span id="rpcName"></span> · <a href="explorer.html" style="color:var(--dim)">explorer</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="deploy.html" style="color:var(--dim)">deploy</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
+  <footer>program <span class="mono" id="programId"></span> · rpc <a href="#" id="rpcName" title="click to use your own rpc in this browser"></a> · <a href="explorer.html" style="color:var(--dim)">explorer</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="deploy.html" style="color:var(--dim)">deploy</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
 </main>
 
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
@@ -107,12 +107,14 @@
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
   const q = new URLSearchParams(location.search);
   const PROGRAM_ID = q.get("program") || "7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6";
-  const RPC = q.get("rpc") || "https://api.mainnet-beta.solana.com";
+  let storedRpc = null; try { storedRpc = localStorage.getItem("passwap.rpc"); } catch {}
+  const RPC = q.get("rpc") || storedRpc || "https://solana-rpc.publicnode.com";
   const conn = new web3.Connection(RPC, "confirmed");
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const pw = makePasswap(web3, nacl, PROGRAM_ID, abi);
   document.getElementById("programId").textContent = PROGRAM_ID;
-  document.getElementById("rpcName").textContent = new URL(RPC).host;
+  document.getElementById("rpcName").textContent = new URL(RPC).host + (storedRpc && !q.get("rpc") ? " (yours)" : "");
+  document.getElementById("rpcName").onclick = (e) => { e.preventDefault(); const v = prompt("rpc url for this browser (empty to go back to the default)", storedRpc || ""); if (v === null) return; try { v.trim() ? localStorage.setItem("passwap.rpc", v.trim()) : localStorage.removeItem("passwap.rpc"); } catch {} location.reload(); };
   const $ = (id) => document.getElementById(id);
   const log = (msg, cls = "") => { const el = $("log"); el.innerHTML = `<span class="${cls}">${msg}</span>`; };
   const WORDS = "acorn amber anvil apron arrow aspen atlas badge baker basil beach beacon birch bison blaze bloom board bramble brass bread bridge brook cabin candle canyon cedar chalk cherry cider cinder clover cobalt comet copper coral cove crane crest crown dawn delta dune eagle ember falcon feather fennel fern finch fjord flint forge fossil frost garnet ginger glade goose grain granite grove harbor hazel heron hollow honey ibis indigo iris ivory jade jasper juniper kelp kestrel kiln lagoon lantern larch lark lava lilac linen lotus lumen maple marble meadow mint moss mulberry myrrh nectar nettle north oak oasis ocean olive onyx orbit orchid otter oyster paddle parcel pebble pepper petal pine plume poppy prairie quail quartz quill quiet raven reed ridge river robin rowan ruby rune saffron sage salt sand sedge shell silver slate smoke snow sorrel spruce stone summit sundial tansy teal thistle thorn tide timber topaz torch trout tulip tundra umber valley velvet violet walnut water willow wren yarrow zephyr".split(" ");

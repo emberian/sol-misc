@@ -68,7 +68,8 @@
   const $ = (id) => document.getElementById(id);
   const log = (m, cls = "") => { $("log").innerHTML = `<span class="${cls}">${m}</span>`; };
   const q = new URLSearchParams(location.search);
-  if (q.get("rpc")) $("rpc").value = q.get("rpc");
+  let storedRpc = null; try { storedRpc = localStorage.getItem("passwap.rpc"); } catch {}
+  if (q.get("rpc") || storedRpc) $("rpc").value = q.get("rpc") || storedRpc;
   const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
   const u64 = (n) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, BigInt(n), true); return b; };
   const cat = (...a) => { const o = new Uint8Array(a.reduce((s, x) => s + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
@@ -102,7 +103,7 @@
   }
   $("connectBtn").onclick = () => connect().catch((e) => log("wallet: " + (e.message || e), "bad"));
 
-  const conn = () => new web3.Connection($("rpc").value.trim() || "https://api.mainnet-beta.solana.com", "confirmed");
+  const conn = () => new web3.Connection($("rpc").value.trim() || "https://solana-rpc.publicnode.com", "confirmed");
   function refresh() {
     try { progKp = parseKey(); } catch { progKp = null; }
     const pid = progKp ? progKp.publicKey.toBase58() : ($("progId").value.trim() || null);

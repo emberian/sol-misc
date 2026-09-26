@@ -41,7 +41,7 @@
   <div class="wrap"><table id="activity"><tr><th>when</th><th>what</th><th>offer</th><th>who</th><th>amounts</th><th>tx</th></tr></table></div>
   <p><button class="ghost" id="more">load older</button> <button class="ghost" id="refresh">refresh</button></p>
   <div id="log"></div>
-  <footer>program <span class="mono" id="programId"></span> · rpc <span id="rpcName"></span> · <a href="index.html" style="color:var(--dim)">claim / make</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
+  <footer>program <span class="mono" id="programId"></span> · rpc <a href="#" id="rpcName" title="click to use your own rpc in this browser"></a> · <a href="index.html" style="color:var(--dim)">claim / make</a> · <a href="protocol.html" style="color:var(--dim)">protocol</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
 </main>
 
 <script src="https://unpkg.com/@solana/web3.js@1.99.0/lib/index.iife.min.js"></script>
@@ -52,14 +52,16 @@
   const web3 = solanaWeb3, PublicKey = web3.PublicKey;
   const q = new URLSearchParams(location.search);
   const PROGRAM_ID = q.get("program") || "7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6";
-  const RPC = q.get("rpc") || "https://api.mainnet-beta.solana.com";
+  let storedRpc = null; try { storedRpc = localStorage.getItem("passwap.rpc"); } catch {}
+  const RPC = q.get("rpc") || storedRpc || "https://solana-rpc.publicnode.com";
   const PAGE = 25;
   const conn = new web3.Connection(RPC, "confirmed");
   const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
   const pw = makePasswap(web3, nacl, PROGRAM_ID, abi);
   const $ = (id) => document.getElementById(id);
   const log = (m, cls = "") => { $("log").innerHTML = `<span class="${cls}">${m}</span>`; };
-  $("programId").textContent = PROGRAM_ID; $("rpcName").textContent = new URL(RPC).host;
+  $("programId").textContent = PROGRAM_ID; $("rpcName").textContent = new URL(RPC).host + (storedRpc && !q.get("rpc") ? " (yours)" : "");
+  $("rpcName").onclick = (e) => { e.preventDefault(); const v = prompt("rpc url for this browser (empty to go back to the default)", storedRpc || ""); if (v === null) return; try { v.trim() ? localStorage.setItem("passwap.rpc", v.trim()) : localStorage.removeItem("passwap.rpc"); } catch {} location.reload(); };
   if (!q.get("rpc")) $("rpcNote").textContent = "the default public RPC is rate-limited; add ?rpc=… to use your own.";
   const explorerTx = (s) => `https://solscan.io/tx/${s}`, explorerAcc = (a) => `https://solscan.io/account/${a}`;
   const short = (k) => { const s = k.toString(); return `<a class="mono" href="${explorerAcc(s)}" title="${s}">${s.slice(0, 4)}…${s.slice(-4)}</a>`; };
