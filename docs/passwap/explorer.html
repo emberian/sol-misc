@@ -113,7 +113,7 @@
     offers.sort((a, b) => Number(b.o.seed - a.o.seed));
     offers.forEach(({ addr, o }, i) => {
       const v = vinfos[i]; const avail = v ? readU64(v.data, 64) : null; if (avail !== null && avail > 0n) open++;
-      const status = avail === null ? `<span class="dim">vault closed by the parties</span>` : `${fmt(avail, dec(o.mintA))}${avail < o.amountA ? ` <span class="dim">of ${fmt(o.amountA, dec(o.mintA))}</span>` : ""}`;
+      const status = avail === null ? `<span class="dim">vault closed by the parties</span>` : `${fmt(avail, dec(o.mintA))}${avail < o.amountA ? ` <span class="dim">of ${fmt(o.amountA, dec(o.mintA))}</span>` : avail > o.amountA ? ` <span class="dim">(${fmt(o.amountA, dec(o.mintA))} + top-ups)</span>` : ""}`;
       const nb = o.notBefore > 0n ? new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time";
       tbl.insertAdjacentHTML("beforeend", `<tr><td>${short(addr)}</td><td>${short(o.maker)}</td><td>${amt(o.amountA, o.mintA)}</td><td>${status}</td><td>${o.amountB === 0n ? "free" : `${fmt(o.amountB, dec(o.mintB))} ${esc(tokens.sym(o.mintB.toString()))} / ${fmt(o.amountA, dec(o.mintA))} ${esc(tokens.sym(o.mintA.toString()))}`}</td><td>${esc(nb)}</td><td>${avail ? `<a href="index.html?offer=${addr.toBase58()}">claim</a>` : ""}</td></tr>`);
     });

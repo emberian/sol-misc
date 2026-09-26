@@ -42,6 +42,6 @@ node scripts/vectors-test.mjs            # localtest / pagetest / deploytest: se
 
 CI (`.github/workflows/passwap.yml`) verifies, builds, checks the generated ABI is committed, runs vectors and the validator suite, and says whether `docs/passwap/passwap.so` is its own build. After a source change: download the artifact of a green run and commit it.
 
-**Mainnet**: `7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6`, deployed 2026-09-26, on-chain sha256 `2bf95baf10089416271684668f88d28ea3d7507c966b42955b1eda8c673c94cc` (CI's build of `7403a25`). Upgrade authority: the deployer wallet.
+**Mainnet**: `7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6`. On-chain sha256 of the deployed bytes `fd5014de8911ab4859bd55b7240defac040ec7ebd945bcd43cf8e656b19271bc`, CI's build of `e9cb50e`; the programdata account is 72,240 bytes, the rest zero. Upgrade authority: the deployer wallet, until the design settles. Exercised on mainnet: a priced make and take, then a free make and free claim.
 
 **Deploy**: `deploy.html` from a browser wallet, or the CLI. Paste the program keypair to keep the id. The wallet holds the upgrade authority and gets the rent back on close.

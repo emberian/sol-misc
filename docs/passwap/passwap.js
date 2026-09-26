@@ -13,6 +13,7 @@
 //   pw.ixMake({maker, seed, mintA, tokenProgramA, mintB, amountA, amountB, claimKey, notBefore}) -> {offer, vaultAuth, ix}
 //   pw.ixTake({claimKey, payer, maker, offer, mintA, mintB, tokenProgramA, tokenProgramB, takeA, payB})
 //   pw.ixCancel({maker, offer, mintA, tokenProgramA})
+//   pw.ixTransferChecked({tokenProgram, from, mint, to, owner, amount, decimals}) -> a plain transfer, e.g. to top up a vault
 //   pw.ixMultisigTransfer / pw.ixMultisigClose    -> raw token-program instructions for recovery without the program
 //   pw.readOffer(bytes) / pw.encodeOffer(fields) / pw.encodeArgs("make", fields)
 (function (root, factory) {
@@ -128,11 +129,17 @@
         { pubkey: authority, isSigner: false, isWritable: false }, ...signers.map((s) => ({ pubkey: s, isSigner: true, isWritable: false }))];
       return new TransactionInstruction({ programId: tokenProgram, data, keys });
     }
+    // a plain transfer_checked by the account's owner: used to top up a vault, which any wallet may do
+    function ixTransferChecked({ tokenProgram, from, mint, to, owner, amount, decimals }) {
+      const data = concat(new Uint8Array([12]), u64le(amount), new Uint8Array([decimals]));
+      const keys = [{ pubkey: from, isSigner: false, isWritable: true }, { pubkey: mint, isSigner: false, isWritable: false }, { pubkey: to, isSigner: false, isWritable: true }, { pubkey: owner, isSigner: true, isWritable: false }];
+      return new TransactionInstruction({ programId: tokenProgram, data, keys });
+    }
     function ixMultisigClose({ tokenProgram, account, dest, authority, signers }) {
       const keys = [{ pubkey: account, isSigner: false, isWritable: true }, { pubkey: dest, isSigner: false, isWritable: true },
         { pubkey: authority, isSigner: false, isWritable: false }, ...signers.map((s) => ({ pubkey: s, isSigner: true, isWritable: false }))];
       return new TransactionInstruction({ programId: tokenProgram, data: new Uint8Array([9]), keys });
     }
-    return { PROGRAM_ID, P, FEE_RECIPIENT, DREGG_MINT, MAKE_FEE, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, priceFor, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
+    return { PROGRAM_ID, P, FEE_RECIPIENT, DREGG_MINT, MAKE_FEE, abi, deriveClaimSeed, deriveClaimKeypair, offerPda, vaultAuth, ata, feeOf, priceFor, ixCreateAtaIdempotent, ixMake, ixTake, ixCancel, ixTransferChecked, ixMultisigTransfer, ixMultisigClose, readOffer, encodeOffer, encodeArgs, u64le };
   };
 });

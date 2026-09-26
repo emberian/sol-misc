@@ -185,6 +185,23 @@ console.log("before: maker A", await bal(maker.publicKey, mintA, tpA), "| payer 
   assert((await conn.getAccountInfo(pw.ata(guest.publicKey, mintB, tpB))) === null, "the guest never needed a mint B account");
   console.log("free offer: made at price 0, claimed for free by a wallet with no mint B account, no fee");
 }
+// ---- top-ups: anyone may send more of token A into the vault after creation; it is claimable at the same rate; cancel returns all of it
+{
+  const { offer, claimKp, vault } = await makeOffer(S(12), "topup phrase here", 1_000_000n, 500_000n);
+  const o = pw.readOffer((await conn.getAccountInfo(offer)).data);
+  // the payer (a third party here) tops the vault up with 1,000,000 more of mint A it received earlier
+  await send([pw.ixTransferChecked({ tokenProgram: tpA, from: pw.ata(payer.publicKey, mintA, tpA), mint: mintA, to: vault, owner: payer.publicKey, amount: 1_000_000n, decimals: decA })], [payer]);
+  assert((await conn.getTokenAccountBalance(vault)).value.amount === "2000000", "vault holds the original plus the top-up");
+  const takeA = 2_000_000n, payB = pw.priceFor(o, takeA); assert(payB === 1_000_000n, "the rate applies to the topped-up amount");
+  await send([...takeAtas(o), pw.ixTake({ claimKey: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB, takeA, payB })], [payer, claimKp]);
+  assert((await conn.getAccountInfo(offer)) === null, "taking everything incl. the top-up closes the offer");
+  const r = await makeOffer(S(13), "topup cancel phrase", 1_000_000n, 1n);
+  await send([pw.ixTransferChecked({ tokenProgram: tpA, from: pw.ata(payer.publicKey, mintA, tpA), mint: mintA, to: r.vault, owner: payer.publicKey, amount: 300_000n, decimals: decA })], [payer]);
+  const makerA0 = await bal(maker.publicKey, mintA, tpA);
+  await send([pw.ixCancel({ maker: maker.publicKey, offer: r.offer, mintA, tokenProgramA: tpA })], [maker]);
+  assert((await bal(maker.publicKey, mintA, tpA)) === makerA0 + 1_300_000n, "cancel returns the deposit and the top-up to the maker");
+  console.log("top-ups: a third party added to the vault; claimable at the rate; cancel returned all of it to the maker");
+}
 // ---- custody: the program is one of three keys. Alone, no single party can move the vault; maker + claimer can, with no program at all.
 {
   const AMT = 5_000_000n;

@@ -42,7 +42,8 @@
     <li id="claim"><b>claim:</b> type the passphrase. take any amount up to what's left. pay at least the rate, or nothing if the offer is free. one transaction, all or nothing.</li>
     <li id="cancel"><b>cancel:</b> the maker takes back what's left, after any no-cancel-before time.</li>
     <li><b>to buy instead:</b> deposit the token you pay with. same rule, other direction.</li>
-    <li>partial claims keep the offer open. emptying it closes it. paying above the rate is fine.</li>
+    <li>partial claims keep the offer open. emptying it closes it. paying above the rate is fine; the claim page lets you choose.</li>
+    <li><b>top-ups:</b> anyone can send more of token A into the vault after creation. it is claimable at the same rate; a cancel returns all of it to the maker.</li>
   </ul>
 
   <h2 id="passphrase">the passphrase</h2>
@@ -111,7 +112,7 @@ spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
   <ul>
     <li>program <span class="mono" id="programId"></span>. every page takes <code>?program=</code>.</li>
     <li>the deploy page's binary is CI's build; CI prints its sha256. compare: <code>solana program dump &lt;PROGRAM_ID&gt; x.so &amp;&amp; sha256sum x.so</code>.</li>
-    <li>the upgrade authority can replace code, not custody. authority <i>none</i> = immutable.</li>
+    <li>the upgrade authority can replace code, not custody. it will be set to <i>none</i> once the design settles, making the program immutable.</li>
     <li><a href="https://github.com/emberian/sol-misc/tree/main/passwap">source, proofs, tests</a> · <a href="explorer.html">explorer</a></li>
   </ul>
 

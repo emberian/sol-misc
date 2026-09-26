@@ -64,7 +64,13 @@
     <div id="takeBox" hidden>
       <label for="takeAmount">how much to take (all of it by default; a partial take leaves the offer open)</label>
       <input id="takeAmount" inputmode="decimal" spellcheck="false">
+      <label for="payAmount">what you pay (the least that clears the rate is filled in; you may pay more)</label>
+      <input id="payAmount" inputmode="decimal" spellcheck="false">
       <div class="kv" id="quote"></div>
+      <div id="topupBox" hidden>
+        <label for="topupAmount">add to this offer's vault (anyone may; it is claimable at the same rate, and a cancel returns it to the maker)</label>
+        <div class="row"><input id="topupAmount" inputmode="decimal" placeholder="amount of the offered token"><button class="ghost" id="topupBtn">add to the vault</button></div>
+      </div>
     </div>
     <label for="passphrase">passphrase</label>
     <input id="passphrase" placeholder="the words you were given" autocomplete="off" spellcheck="false">
@@ -223,14 +229,16 @@
     offerCache.remaining = remaining;
     const [symA, symB] = await Promise.all([symOf(o.mintA), symOf(o.mintB)]); offerCache.symA = symA; offerCache.symB = symB;
     const tag = (sym, mint) => { const s = mint.toBase58(), sh = `${s.slice(0, 4)}…${s.slice(-4)}`; return sym === sh ? `<span class="mono" title="${s}">${sh}</span>` : `<b>${sym}</b> <span class="dim mono" title="${s}">${sh}</span>`; };
-    $("offerView").innerHTML = `<div>available</div><div>${fmt(remaining, decA)} ${tag(symA, o.mintA)}${remaining < o.amountA ? ` <span class="dim">(of ${fmt(o.amountA, decA)} originally)</span>` : ""}</div>
+    $("offerView").innerHTML = `<div>available</div><div>${fmt(remaining, decA)} ${tag(symA, o.mintA)}${remaining < o.amountA ? ` <span class="dim">(of ${fmt(o.amountA, decA)} originally)</span>` : remaining > o.amountA ? ` <span class="dim">(${fmt(o.amountA, decA)} originally, topped up)</span>` : ""}</div>
       <div>rate</div><div>${o.amountB === 0n ? `<b>free</b>: no payment, no fee` : `at least ${fmt(o.amountB, decB)} ${tag(symB, o.mintB)} per ${fmt(o.amountA, decA)} ${symA} taken, plus a ${abi.fee.take.percent}% fee on what you pay`}</div>
       <div>maker</div><div class="mono">${o.maker.toBase58()}</div><div>claim key</div><div class="mono">${o.claimKey.toBase58()}</div>
       <div>maker can cancel</div><div>${o.notBefore > 0n ? "not before " + new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time"}</div>
       <div>custody</div><div>2-of-3 multisig <span class="mono">${o.vaultAuth.toBase58()}</span>${o.vaultAuth.equals(pw.vaultAuth(addr)) ? "" : ' <span class="bad">(does not match the derived address!)</span>'}<br>vault <span class="mono">${pw.ata(o.vaultAuth, o.mintA, tpA).toBase58()}</span></div>`;
     await computeOpens();
-    $("offerView").hidden = false; $("takeBox").hidden = false; $("takeAmount").value = fmt(remaining, decA); quote(); log(""); refreshButtons();
+    $("offerView").hidden = false; $("takeBox").hidden = false; $("topupBox").hidden = false; $("takeAmount").value = fmt(remaining, decA); fillMinPay(); quote(); log(""); refreshButtons();
   }
+  function fillMinPay() { if (!offerCache) return; const { o, decA, decB } = offerCache; let takeA; try { takeA = toBase($("takeAmount").value, decA); } catch { takeA = 0n; } $("payAmount").value = takeA > 0n ? fmt(pw.priceFor(o, takeA), decB) : ""; }
+  function chosenPay() { const { decB } = offerCache; try { return toBase($("payAmount").value, decB); } catch { return null; } }
   // every account a claim would create, and who ends up holding its rent. shown so nothing is hidden in the transaction.
   async function computeOpens() {
     if (!offerCache) return;
@@ -245,9 +253,11 @@
     const { o, decA, decB, remaining, symA = "", symB = "" } = offerCache;
     let takeA; try { takeA = toBase($("takeAmount").value, decA); } catch { takeA = 0n; }
     if (takeA <= 0n || takeA > remaining) { $("quote").innerHTML = `<div>you pay</div><div class="warn">enter an amount between ${fmt(1n, decA)} and ${fmt(remaining, decA)}</div>`; return; }
-    const payB = pw.priceFor(o, takeA), fee = pw.feeOf(payB);
+    const minB = pw.priceFor(o, takeA), payB = chosenPay(); 
+    if (payB === null || payB < minB) { $("quote").innerHTML = `<div>you pay</div><div class="warn">at least ${fmt(minB, decB)} ${symB} clears the rate for ${fmt(takeA, decA)} ${symA}</div>`; return; }
+    const fee = pw.feeOf(payB);
     const opens = offerCache.opens || [];
-    $("quote").innerHTML = `<div>you receive</div><div>${fmt(takeA, decA)} ${symA}</div><div>you pay</div><div>${o.amountB === 0n ? "<b>nothing</b>: this offer is free" : `${fmt(payB, decB)} + ${fmt(fee, decB)} fee = <b>${fmt(payB + fee, decB)} ${symB}</b>`}${takeA < remaining ? ` <span class="dim">(partial: the offer stays open with ${fmt(remaining - takeA, decA)})</span>` : ""}</div>
+    $("quote").innerHTML = `<div>you receive</div><div>${fmt(takeA, decA)} ${symA}</div><div>you pay</div><div>${payB === 0n ? "<b>nothing</b>: this offer is free" : `${fmt(payB, decB)} + ${fmt(fee, decB)} fee = <b>${fmt(payB + fee, decB)} ${symB}</b>${payB > minB ? ` <span class="dim">(${fmt(payB - minB, decB)} above the rate, by your choice)</span>` : ""}`}${takeA < remaining ? ` <span class="dim">(partial: the offer stays open with ${fmt(remaining - takeA, decA)})</span>` : ""}</div>
       <div>one-time SOL</div><div>${opens.length ? opens.map(([l, w]) => `${fmtSol(l)} ${w}`).join("<br>") : "none: every account this needs already exists"}${wallet ? "" : "<br><span class=\"dim\">connect a wallet to see whether your own account for the token exists</span>"}</div>`;
   }
   async function claim() {
@@ -257,7 +267,8 @@
     try {
       const takeA = toBase($("takeAmount").value, decA);
       if (takeA <= 0n || takeA > remaining) throw new Error("amount to take must be between " + fmt(1n, decA) + " and " + fmt(remaining, decA));
-      const payB = pw.priceFor(o, takeA);
+      const minB = pw.priceFor(o, takeA), payB = chosenPay();
+      if (payB === null || payB < minB) throw new Error("the payment must be at least " + fmt(minB, offerCache.decB) + " to clear the rate");
       log("deriving claim key (a few seconds)…");
       const kp = await pw.deriveClaimKeypair($("passphrase").value, addr);
       const claimKp = web3.Keypair.fromSecretKey(kp.secretKey);
@@ -317,6 +328,7 @@
 
   function refreshButtons() {
     $("claimBtn").disabled = !offerCache || !$("passphrase").value.trim();
+    $("topupBtn").disabled = !offerCache || !wallet;
     $("claimBtn").textContent = wallet ? "claim: pay and receive" : "derive claim key";
     $("makeBtn").disabled = !wallet;
   }
@@ -328,7 +340,19 @@
   $("genPass").onclick = () => { $("makePass").value = genPass(); passNote(); };
   function passNote() { const n = $("makePass").value.trim().split(/\s+/).filter(Boolean).length; $("passNote").textContent = n && n < 4 ? "your call: a short passphrase can be guessed offline against the public claim key. fine for a gift or a quick trade; use the generator for anything valuable." : ""; }
   $("makePass").addEventListener("input", passNote);
-  $("takeAmount").addEventListener("input", quote);
+  $("takeAmount").addEventListener("input", () => { fillMinPay(); quote(); });
+  $("payAmount").addEventListener("input", quote);
+  $("topupBtn").onclick = async () => {
+    if (!offerCache) return; if (!wallet) { log("connect a wallet first", "warn"); return; }
+    const { addr, o, tpA, decA } = offerCache;
+    try {
+      const amount = toBase($("topupAmount").value, decA); if (amount <= 0n) throw new Error("enter an amount");
+      const vault = pw.ata(o.vaultAuth, o.mintA, tpA), before = await vaultAmount(vault);
+      const sig = await signAndSend([pw.ixTransferChecked({ tokenProgram: tpA, from: pw.ata(wallet, o.mintA, tpA), mint: o.mintA, to: vault, owner: wallet, amount, decimals: decA })], [], async () => { const now = await vaultAmount(vault); return now !== null && now > before; });
+      log(`added ${fmt(amount, decA)} to the vault. <a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
+      await loadOffer();
+    } catch (e) { log("failed: " + (e.message || e), "bad"); }
+  };
   const mintOf = (id) => new PublicKey(($(id).dataset.mint || $(id).value).trim());
   async function makeQuote() {
     try {

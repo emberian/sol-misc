@@ -70,6 +70,8 @@ let offerAddr;
   await page.fill("#passphrase", "wrong words here entirely"); await page.click("#claimBtn");
   await page.waitForFunction(() => /does not derive|failed|claimed/.test(document.getElementById("log").innerText), { timeout: 60000 });
   const wrong = await logText(page); console.log("wrong passphrase ->", wrong.slice(0, 80)); if (!/does not derive/.test(wrong)) fail("wrong passphrase should be caught client-side");
+  await page.fill("#payAmount", "3"); await page.dispatchEvent("#payAmount", "input");
+  console.log("quote with 3 paid:", (await page.locator("#quote").innerText()).replace(/\s+/g, " ").slice(0, 120));
   await page.fill("#passphrase", passphrase); await page.click("#claimBtn");
   await page.waitForFunction(() => /^claimed|failed/.test(document.getElementById("log").innerText), { timeout: 90000 });
   const t = await logText(page); console.log("claim ->", t.slice(0, 60)); if (!/^claimed/.test(t)) fail(t);
