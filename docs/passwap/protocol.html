@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>passwap protocol</title>
+<meta name="description" content="How passwap works, for the people using it: the three moves, the passphrase, fees, what lives on chain, what is guaranteed, and how to recover funds without the program.">
+<style>
+  :root { --bg:#0f0e13; --panel:#17161d; --ink:#e8e4f0; --soft:#a8a2b8; --dim:#5f5a70; --line:#2a2735; --ok:#79c98c; --warn:#e0b96a; --bad:#d98a7a; --accent:#a89fd8; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg:#f6f3ee; --panel:#fffdf9; --ink:#1d1a24; --soft:#4d4859; --dim:#8a849a; --line:#e2ddd4; --accent:#5c4fa8; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font: 15px/1.6 ui-monospace, "SF Mono", Menlo, monospace; }
+  main { max-width: 800px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 36px 0 10px; color: var(--accent); } h3 { font-size: 15px; margin: 20px 0 6px; }
+  .sub { color: var(--soft); margin: 0 0 20px; font-size: 13px; }
+  nav { display:flex; flex-wrap:wrap; gap:8px 14px; font-size: 13px; margin-bottom: 8px; } nav a { color: var(--soft); text-decoration: none; } nav a:hover { color: var(--ink); }
+  p, li { color: var(--ink); } li { margin: 4px 0; } a { color: var(--accent); }
+  code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 14px; } th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; } th { color: var(--dim); font-weight: normal; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .dim { color: var(--dim); } .mono { word-break: break-all; }
+  footer { color:var(--dim); font-size:12px; margin-top:32px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>passwap · how it works</h1>
+  <p class="sub">for the people using it. the numbers, addresses and layouts on this page are read live from <code>abi.json</code>, which is generated from the verified program source, so they cannot drift from what the program does.</p>
+  <nav>
+    <a href="#what">what it is</a><a href="#moves">the three moves</a><a href="#passphrase">the passphrase</a><a href="#fees">fees and rent</a><a href="#chain">what lives on chain</a>
+    <a href="#guarantees">guarantees</a><a href="#recovery">recovery without the program</a><a href="#verify">verifying what you use</a><a href="#faq">faq</a>
+  </nav>
+
+  <h2 id="what">what it is</h2>
+  <p>passwap is an escrow for a one-off token swap between two people who may not know each other's wallets. the <b>maker</b> deposits some of token A and names a price in token B. instead of naming a counterparty wallet, the maker names a <b>claim key</b> derived from a passphrase. whoever holds the passphrase can <b>claim</b>: they pay the price and receive the deposit in one atomic transaction. until then the maker can <b>cancel</b> and take the deposit back.</p>
+  <p>the on-chain program is small and its decision logic is machine-verified. but the design does not ask you to trust it with custody: every vault is owned by a 2-of-3 multisig of {the program, the maker, the claim key}. the program can never move a vault alone, and the maker and claimer together can move it with no program at all.</p>
+
+  <h2 id="moves">the three moves</h2>
+  <h3 id="make">make (the maker)</h3>
+  <ol>
+    <li>you choose token A, the amount, token B, the price, a passphrase, and optionally a time before which you promise not to cancel.</li>
+    <li>your browser derives the claim key from the passphrase (see below) and builds one transaction that: creates the offer record, creates the vault's 2-of-3 multisig, and moves your deposit from your token account into the vault.</li>
+    <li>you get an offer address and a link. you share the passphrase privately with the person who should claim.</li>
+  </ol>
+  <h3 id="claim">claim (the taker)</h3>
+  <ol>
+    <li>you open the offer link and type the passphrase. your browser derives the claim key locally and checks it against the one recorded in the offer. a wrong passphrase is caught here, before anything is sent.</li>
+    <li>you connect a wallet holding token B. one transaction, signed by both your wallet and the claim key: the price goes from your token account to the maker's, the fee to the fee recipient's, and the deposit from the vault to your token account. the vault closes and the offer's rent goes back to the maker.</li>
+  </ol>
+  <h3 id="cancel">cancel (the maker)</h3>
+  <p>any time before a claim, unless you set a no-cancel-before time that has not passed yet. the deposit returns to your token account, the vault closes, and the offer's rent comes back to you.</p>
+
+  <h2 id="passphrase">the passphrase</h2>
+  <p>the passphrase never touches the chain and never leaves your browser. it is stretched into an Ed25519 keypair:</p>
+  <div class="box" id="kdf">loading abi.json…</div>
+  <ul>
+    <li>the salt includes the <b>offer address</b>, so the same words give a different key for every offer. a passphrase cannot be replayed against another offer.</li>
+    <li>the chain only ever sees the public key and a signature by it. someone watching the network learns nothing about the words.</li>
+    <li>use five or more random words. the make page can generate them. share them over a private channel; anyone who learns them before the claim can claim.</li>
+    <li>if you lose the passphrase, you cannot claim; the maker can cancel and re-offer. the maker cannot recover the words either: they were never stored.</li>
+    <li>after deriving, the claim page can <b>export the claim keypair</b> as a JSON file. that file is one of the vault's three keys; you only need it for <a href="#recovery">recovery</a>.</li>
+  </ul>
+
+  <h2 id="fees">fees and rent</h2>
+  <div class="box" id="fee">loading abi.json…</div>
+  <table>
+    <tr><th>item</th><th>paid by</th><th>comes back?</th></tr>
+    <tr><td>offer record (194 bytes, about 0.0022 SOL)</td><td>maker, at make</td><td>to the maker at claim or cancel</td></tr>
+    <tr><td>vault token account (about 0.0021 SOL)</td><td>maker, at make</td><td>to the claimer at claim, to the maker at cancel</td></tr>
+    <tr><td>vault multisig (355 bytes, about 0.0034 SOL)</td><td>maker, at make</td><td>no: the token program has no way to close a multisig</td></tr>
+    <tr><td>your own token account for a token you have not held before (about 0.002 SOL)</td><td>whoever needs it</td><td>it stays yours</td></tr>
+    <tr><td>transaction fees</td><td>each signer</td><td>no (about 0.00001 SOL each)</td></tr>
+  </table>
+  <p>so a completed trade costs the maker about 0.0034 SOL net, the claimer the fee above plus dust, and nothing else. the fee exists to pay back the SOL parked as the program's own rent and the cost of building and verifying it.</p>
+
+  <h2 id="chain">what lives on chain</h2>
+  <p>one program, and per offer: an <b>offer record</b> (a PDA of the program), a <b>vault authority</b> (a PDA of the program that is an SPL token multisig, owned by the token program), and the <b>vault</b> (the vault authority's associated token account for token A).</p>
+  <div class="box" id="derivations">loading abi.json…</div>
+  <h3>the offer record</h3>
+  <table id="offerFields"><tr><th>field</th><th>offset</th><th>bytes</th><th>type</th></tr></table>
+  <h3>instructions</h3>
+  <p>one byte of tag, then the arguments. the account lists below are the exact order the program expects.</p>
+  <div id="instructions"></div>
+
+  <h2 id="guarantees">guarantees</h2>
+  <p>the program's decision logic is a pure library checked by the <a href="https://github.com/verus-lang/verus">Verus</a> verifier on every commit. in plain words, these hold for every claim, cancel and make the program executes:</p>
+  <ol>
+    <li>no claim without a signature by the claim key recorded in the offer.</li>
+    <li>the maker receives exactly the recorded price, into the maker's own account for token B.</li>
+    <li>the claimer receives exactly the recorded deposit, into the claimer's own account for token A.</li>
+    <li>the fee is exactly the price divided by the fee divisor, never more, and goes only to the fee recipient's own account.</li>
+    <li>the only authorities ever used are the claimer over the claimer's own account and the vault's multisig over the vault. the program never moves anyone else's tokens.</li>
+    <li>only the maker can cancel, and only once the no-cancel-before time has passed; the refund is exactly the deposit to the maker's own account.</li>
+    <li>a make records exactly what was asked and creates the vault's multisig as exactly 2-of-[program, maker, claim key], with maker and claim key distinct.</li>
+    <li>the program never moves a vault on its own signature: every vault move carries the maker's or the claimer's signature too.</li>
+    <li>a closed offer admits neither a claim nor a cancel: no double claim.</li>
+    <li>a legitimate claim, cancel or make is never refused (completeness, proved in the same place as soundness).</li>
+  </ol>
+  <p>the theorem-level version, with the names of the lemmas and what is trusted rather than proved, is <a href="https://github.com/emberian/sol-misc/blob/main/passwap/PROPERTIES.md">PROPERTIES.md</a>. what is trusted: the thin adapter that gathers facts and executes the plan (about 300 lines), the SPL token programs' multisig and transfer semantics, and the Solana runtime.</p>
+
+  <h2 id="recovery">recovery without the program</h2>
+  <p>the vault's owner is an ordinary SPL token multisig with threshold 2 and signers [program, maker, claim key]. the token program checks those signatures itself. so if this program is ever closed, upgraded into something broken, or you simply do not want to use it, the maker and the claimer can move the vault together with plain token-program instructions:</p>
+  <ol>
+    <li>the claimer derives the claim key on the claim page and clicks <b>export claim keypair</b> (a JSON file). the maker uses their wallet keypair.</li>
+    <li>find the vault authority and the vault. both are shown on the claim page under <b>custody</b>, and both are derivable: the vault authority is the PDA <code>["vault-auth", offer]</code> of the program, the vault is its associated token account for token A.</li>
+    <li>both parties sign one transfer. with the CLI, on a machine holding both files:</li>
+  </ol>
+<pre>spl-token transfer &lt;MINT_A&gt; &lt;AMOUNT&gt; &lt;DESTINATION_WALLET&gt; \
+  --from &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
+  --multisig-signer maker.json --multisig-signer passwap-claim-XXXXXXXX.json \
+  --fee-payer maker.json --fund-recipient --allow-unfunded-recipient
+spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
+  --multisig-signer maker.json --multisig-signer passwap-claim-XXXXXXXX.json --fee-payer maker.json</pre>
+  <p>if the two parties are on different machines, use the CLI's offline signing (<code>--sign-only</code> on one side, <code>--signer</code> on the other) or have one party sign a serialized transaction the other built. the program is not involved either way. what a recovery does <i>not</i> do: the offer record's own rent (about 0.002 SOL) stays parked, since only the program could close it.</p>
+  <p class="dim">what the two-key rule means for you: a maker alone cannot pull a deposit back before the no-cancel time by going around the program, and a claimer alone cannot take the deposit without paying. both of those need the program, which enforces the price and the time; or the other party's cooperation.</p>
+
+  <h2 id="verify">verifying what you use</h2>
+  <ul>
+    <li>the program id is in the footer of every page (<span class="mono" id="programId"></span>). the pages take <code>?program=</code> to point at another deployment.</li>
+    <li>the binary the deploy page offers is committed next to it, and the CI run for every commit prints its sha256 after re-verifying and rebuilding from source. compare it with what is on chain: <code>solana program dump &lt;PROGRAM_ID&gt; onchain.so &amp;&amp; sha256sum onchain.so</code>.</li>
+    <li>the upgrade authority is the trust knob. while a wallet holds it, that wallet can replace the program; because of the two-key custody rule, even a hostile replacement cannot move a vault without the maker or the claimer. an authority of <i>none</i> makes the program immutable.</li>
+    <li>source, proofs, tests and this page: <a href="https://github.com/emberian/sol-misc/tree/main/passwap">github.com/emberian/sol-misc/passwap</a>.</li>
+  </ul>
+
+  <h2 id="faq">faq</h2>
+  <p><b>can the maker take my payment and keep the deposit?</b> no. payment and release are one transaction; if either fails nothing moves.</p>
+  <p><b>can the maker cancel right after i pay?</b> no. once your claim lands the offer is closed. before it lands, a cancel that lands first makes your claim fail harmlessly. a no-cancel-before time removes even that race for its duration.</p>
+  <p><b>can the developer take the funds?</b> not through the program: it never moves a vault without the maker's or the claimer's signature, and the fee is fixed by the program's source. the developer can upgrade the program while holding its upgrade authority, which could break the flow but not the custody rule.</p>
+  <p><b>can someone front-run my claim?</b> the claim needs a signature by the claim key. the passphrase is never sent anywhere, so an observer of the network cannot produce one.</p>
+  <p><b>which tokens work?</b> any SPL Token or Token-2022 mint, in any combination.</p>
+  <p><b>what if the fee recipient does not have an account for token B?</b> the claim page creates it, idempotently, in the same transaction; you pay its rent (about 0.002 SOL), once per token.</p>
+  <p><b>what does the maker pay if nobody ever claims?</b> the multisig's rent, about 0.0034 SOL, and transaction fees. everything else comes back on cancel.</p>
+
+  <footer>program <span class="mono" id="programId2"></span> · <a href="index.html" style="color:var(--dim)">claim / make</a> · <a href="deploy.html" style="color:var(--dim)">deploy</a> · <a href="https://github.com/emberian/sol-misc/tree/main/passwap" style="color:var(--dim)">source</a></footer>
+</main>
+<script>
+(async function () {
+  const q = new URLSearchParams(location.search);
+  const PROGRAM_ID = q.get("program") || "7bGfrNxemPSvthXXnYcHfDY8cjgWYeeysWm463tzfmh6";
+  for (const id of ["programId", "programId2"]) document.getElementById(id).textContent = PROGRAM_ID;
+  const abi = await (await fetch("abi.json", { cache: "no-store" })).json();
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  document.getElementById("kdf").innerHTML = `<b>${esc(abi.claim_kdf.name)}</b>, ${abi.claim_kdf.rounds.toLocaleString()} rounds, salt <code>${esc(abi.claim_kdf.salt)}</code> followed by the 32 bytes of the offer address; the 32-byte output is the seed of an ${esc(abi.claim_kdf.key)}.<br><span class="dim">the passphrase is normalized first: NFKC, trimmed, lower-cased, single spaces between words. so capitalization and extra spaces do not matter.</span>`;
+  document.getElementById("fee").innerHTML = `<b>${abi.fee.bps} basis points</b> (${(abi.fee.bps / 100).toFixed(2)}%) of the price, computed as <code>${esc(abi.fee.amount)}</code>, paid by the <b>${esc(abi.fee.paid_by)}</b> in token B to <code class="mono">${esc(abi.fee.recipient)}</code> (its ${esc(abi.fee.to)}). there is no fee on make or cancel.`;
+  document.getElementById("derivations").innerHTML = `offer record: PDA of the program with seeds <code>[${abi.offer.pda_seeds.map(esc).join(", ")}]</code> (the seed is a number the maker picks; the page uses the current time)<br>vault authority: PDA of the program with seeds <code>[${abi.vault_auth.pda_seeds.map(esc).join(", ")}]</code>, an SPL multisig of ${abi.vault_auth.multisig.len} bytes, threshold ${abi.vault_auth.multisig.m} of ${abi.vault_auth.multisig.n}, signers <code>[${abi.vault_auth.multisig.signers.map(esc).join(", ")}]</code><br>vault: the ${esc(abi.vault_auth.vault)}<br>token programs: <span class="mono">${esc(abi.programs.token)}</span> and <span class="mono">${esc(abi.programs.token_2022)}</span>`;
+  const tbl = document.getElementById("offerFields");
+  for (const f of abi.offer.fields) tbl.insertAdjacentHTML("beforeend", `<tr><td>${esc(f.name)}</td><td>${f.offset}</td><td>${f.len}</td><td>${esc(f.kind)}</td></tr>`);
+  const ins = document.getElementById("instructions");
+  for (const [name, ix] of Object.entries(abi.instructions)) {
+    const args = ix.args.length ? `<table><tr><th>argument</th><th>offset (after tag)</th><th>bytes</th><th>type</th></tr>${ix.args.map((f) => `<tr><td>${esc(f.name)}</td><td>${f.offset}</td><td>${f.len}</td><td>${esc(f.kind)}</td></tr>`).join("")}</table>` : `<p class="dim">no arguments</p>`;
+    const accs = `<table><tr><th>#</th><th>account</th><th>signer</th><th>writable</th></tr>${ix.accounts.map((a, i) => `<tr><td>${i}</td><td>${esc(a.name)}</td><td>${a.signer ? "yes" : ""}</td><td>${a.writable ? "yes" : ""}</td></tr>`).join("")}</table>`;
+    ins.insertAdjacentHTML("beforeend", `<h3>${esc(name)} <span class="dim">tag ${ix.tag}</span></h3>${args}${accs}`);
+  }
+})();
+</script>
+</body>
+</html>

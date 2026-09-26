@@ -1,5 +1,5 @@
 target/
 node_modules/
 *.so
-!docs/otc/dregg_otc.so
+!docs/passwap/passwap.so
 .DS_Store

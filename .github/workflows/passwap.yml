@@ -1,0 +1,98 @@
+name: otc
+
+on:
+  push:
+    paths: ["passwap/**", "docs/passwap/**", ".github/workflows/passwap.yml"]
+  pull_request:
+    paths: ["passwap/**", "docs/passwap/**"]
+  workflow_dispatch:
+
+env:
+  VERUS_RELEASE: release/0.2026.09.20.aef82ed
+  VERUS_ASSET: verus-0.2026.09.20.aef82ed-x86-linux.zip
+  VERUS_RUST: 1.98.1-x86_64-unknown-linux-gnu
+  AGAVE: v4.0.2
+
+jobs:
+  verify-build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: passwap
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Verus: the core must verify
+      - name: cache verus
+        id: verus-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/verus
+          key: verus-${{ env.VERUS_RELEASE }}
+      - name: fetch verus
+        if: steps.verus-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/verus && cd ~/verus
+          curl -sSL -o verus.zip "https://github.com/verus-lang/verus/releases/download/${VERUS_RELEASE}/${VERUS_ASSET}"
+          unzip -q verus.zip && rm verus.zip
+      - name: rust toolchain for verus
+        run: rustup toolchain install ${VERUS_RUST} --profile minimal && rustup component add rust-src rustc-dev llvm-tools --toolchain ${VERUS_RUST}
+      - name: verify core
+        run: |
+          ~/verus/verus-x86-linux/verus core/src/lib.rs --crate-type lib 2>&1 | tee verus.log
+          grep -E 'verification results:: [0-9]+ verified, 0 errors' verus.log
+
+      # ---- SBF build (reproducible artifact) + generated ABI
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            passwap/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('passwap/Cargo.lock', 'passwap/**/Cargo.toml') }}
+      - name: agave toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${AGAVE}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: build program
+        run: cd program && cargo build-sbf
+      - name: generate abi and vectors
+        run: cargo run -q -p passwap-tools --bin gen-abi -- web ../docs/passwap && git diff --exit-code -- web/abi.json web/vectors.json ../docs/passwap/abi.json ../docs/passwap/vectors.json
+      - name: binary hash
+        run: |
+          sha256sum target/deploy/passwap.so | tee sha256.txt
+          echo "docs copy:" && sha256sum ../docs/passwap/passwap.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passwap.so
+          path: passwap/target/deploy/passwap.so
+
+      # ---- client agreement and end-to-end
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: js deps
+        run: cd web && npm ci --silent || npm install --silent --no-audit --no-fund @solana/web3.js@1 tweetnacl bs58
+      - name: vectors
+        run: node scripts/vectors-test.mjs
+      - name: validator end-to-end
+        run: |
+          set -e
+          L=$RUNNER_TEMP/otc; mkdir -p $L
+          for k in mintauth maker payer program; do solana-keygen new --no-bip39-passphrase --silent -o $L/$k.json; done
+          solana-test-validator --reset --quiet --ledger $L/ledger --mint $(solana-keygen pubkey $L/mintauth.json) --rpc-port 8899 >$L/validator.log 2>&1 &
+          for i in $(seq 1 60); do curl -s -m 2 http://127.0.0.1:8899 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' | grep -q ok && break; sleep 1; done
+          U=http://127.0.0.1:8899
+          solana airdrop 10 $(solana-keygen pubkey $L/maker.json) -u $U >/dev/null
+          solana airdrop 10 $(solana-keygen pubkey $L/payer.json) -u $U >/dev/null
+          solana program deploy target/deploy/passwap.so --program-id $L/program.json -u $U -k $L/mintauth.json
+          PID=$(solana-keygen pubkey $L/program.json)
+          MA=$(spl-token create-token --program-2022 --decimals 6 -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json --output json | python3 -c "import json,sys; print(json.load(sys.stdin)['commandOutput']['address'])")
+          MB=$(spl-token create-token --decimals 6 -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json --output json | python3 -c "import json,sys; print(json.load(sys.stdin)['commandOutput']['address'])")
+          spl-token create-account $MA --owner $(solana-keygen pubkey $L/maker.json) -u $U --fee-payer $L/mintauth.json >/dev/null
+          spl-token mint $MA 4000000 --recipient-owner $(solana-keygen pubkey $L/maker.json) -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json >/dev/null
+          spl-token create-account $MB --owner $(solana-keygen pubkey $L/payer.json) -u $U --fee-payer $L/mintauth.json >/dev/null
+          spl-token mint $MB 2000 --recipient-owner $(solana-keygen pubkey $L/payer.json) -u $U --fee-payer $L/mintauth.json --mint-authority $L/mintauth.json >/dev/null
+          node scripts/localtest.mjs $U $PID $MA $MB $L/maker.json $L/payer.json

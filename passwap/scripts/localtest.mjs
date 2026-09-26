@@ -1,0 +1,144 @@
+// End-to-end test against a local validator.
+//   node scripts/localtest.mjs <rpc> <programId> <mintA(2022)> <mintB(token)> <maker.json> <payer.json>
+// Expects: maker holds mint A, payer holds mint B.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const web = (m) => require(path.join(here, "../web", m));
+const web3 = web("node_modules/@solana/web3.js");
+const nacl = web("node_modules/tweetnacl");
+const makePasswap = web("passwap.js");
+const abi = web("abi.json");
+
+const [rpc, programId, mintAStr, mintBStr, makerPath, payerPath] = process.argv.slice(2);
+const conn = new web3.Connection(rpc, "confirmed");
+const kp = (p) => web3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8"))));
+const maker = kp(makerPath), payer = kp(payerPath);
+const mintA = new web3.PublicKey(mintAStr), mintB = new web3.PublicKey(mintBStr);
+const pw = makePasswap(web3, nacl, programId, abi);
+const tpA = pw.P.token2022, tpB = pw.P.token;
+const decA = (await conn.getAccountInfo(mintA)).data[44];
+const FEE = pw.FEE_RECIPIENT;
+
+const bal = async (owner, mint, tp) => { try { return BigInt((await conn.getTokenAccountBalance(pw.ata(owner, mint, tp))).value.amount); } catch { return 0n; } };
+const send = async (ixs, signers) => {
+  const tx = new web3.Transaction().add(...ixs);
+  tx.feePayer = signers[0].publicKey;
+  tx.recentBlockhash = (await conn.getLatestBlockhash()).blockhash;
+  tx.sign(...signers);
+  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+  await conn.confirmTransaction(sig, "confirmed");
+  return sig;
+};
+const assert = (c, m) => { if (!c) { console.error("ASSERT FAILED:", m); process.exit(1); } };
+const mustFail = async (name, ixs, signers) => { let f = false; try { await send(ixs, signers); } catch { f = true; } assert(f, name + " must be refused"); console.log("refused:", name); };
+// the taker's ATAs: their own for A, the maker's for B, the fee recipient's for B
+const takeAtas = (o) => [pw.ixCreateAtaIdempotent(payer.publicKey, payer.publicKey, mintA, tpA), pw.ixCreateAtaIdempotent(payer.publicKey, o.maker, mintB, tpB), pw.ixCreateAtaIdempotent(payer.publicKey, FEE, mintB, tpB)];
+const makeOffer = async (seed, phrase, amountA, amountB, notBefore = 0n) => {
+  const [offer] = pw.offerPda(maker.publicKey, seed);
+  const claim = await pw.deriveClaimKeypair(phrase, offer);
+  const claimKp = web3.Keypair.fromSecretKey(claim.secretKey);
+  const { ix, vaultAuth } = pw.ixMake({ maker: maker.publicKey, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: claimKp.publicKey, notBefore });
+  await send([pw.ixCreateAtaIdempotent(maker.publicKey, vaultAuth, mintA, tpA), ix], [maker]);
+  return { offer, claimKp, vaultAuth, vault: pw.ata(vaultAuth, mintA, tpA) };
+};
+
+const AMOUNT_A = 888_888_000_000n; // 888,888 tokens at 6 decimals
+const AMOUNT_B = 300_000_000n;     // 300 USDC at 6 decimals
+const passphrase = "copper lantern quiet river nine";
+
+console.log("maker", maker.publicKey.toBase58(), "payer", payer.publicKey.toBase58(), "fee recipient", FEE.toBase58());
+console.log("before: maker A", await bal(maker.publicKey, mintA, tpA), "| payer B", await bal(payer.publicKey, mintB, tpB));
+
+// ---- offer 1: make then take with the passphrase-derived key; the fee lands with the recipient
+{
+  const { offer, claimKp, vaultAuth, vault } = await makeOffer(1n, passphrase, AMOUNT_A, AMOUNT_B);
+  console.log("offer1", offer.toBase58(), "claim key", claimKp.publicKey.toBase58(), "vault auth", vaultAuth.toBase58());
+  const o = pw.readOffer((await conn.getAccountInfo(offer)).data);
+  assert(o.amountA === AMOUNT_A && o.amountB === AMOUNT_B && o.claimKey.equals(claimKp.publicKey) && o.maker.equals(maker.publicKey) && o.vaultAuth.equals(vaultAuth), "offer fields");
+  assert((await conn.getTokenAccountBalance(vault)).value.amount === AMOUNT_A.toString(), "vault funded");
+  const ms = await conn.getAccountInfo(vaultAuth);
+  assert(ms && ms.data.length === abi.vault_auth.multisig.len && ms.data[0] === 2 && ms.data[1] === 3 && ms.data[2] === 1 && ms.owner.equals(tpA), "vault authority is an initialized 2-of-3 multisig owned by the token program");
+  assert(new web3.PublicKey(ms.data.slice(3, 35)).equals(offer) && new web3.PublicKey(ms.data.slice(35, 67)).equals(maker.publicKey) && new web3.PublicKey(ms.data.slice(67, 99)).equals(claimKp.publicKey), "multisig signers are [offer, maker, claim key]");
+  // wrong passphrase must fail
+  const wrong = await pw.deriveClaimKeypair("wrong words entirely", offer);
+  const wrongKp = web3.Keypair.fromSecretKey(wrong.secretKey);
+  let failed = false;
+  try { await send([...takeAtas(o), pw.ixTake({ claimKey: wrongKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB })], [payer, wrongKp]); }
+  catch (e) { failed = true; console.log("wrong passphrase refused:", (e.message.match(/custom program error: (0x[0-9a-f]+)/) || [])[1] || e.message.slice(0, 80)); }
+  assert(failed, "wrong claim key must be refused");
+  // right passphrase takes; exact deltas including the fee
+  const payerA0 = await bal(payer.publicKey, mintA, tpA), payerB0 = await bal(payer.publicKey, mintB, tpB), makerB0 = await bal(maker.publicKey, mintB, tpB), fee0 = await bal(FEE, mintB, tpB);
+  const sig = await send([...takeAtas(o), pw.ixTake({ claimKey: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB })], [payer, claimKp]);
+  console.log("take:", sig.slice(0, 20));
+  const fee = pw.feeOf(AMOUNT_B);
+  assert((await conn.getAccountInfo(offer)) === null, "offer closed");
+  assert((await conn.getAccountInfo(vault)) === null, "vault closed");
+  assert((await bal(payer.publicKey, mintA, tpA)) === payerA0 + AMOUNT_A, "payer received exactly A");
+  assert((await bal(maker.publicKey, mintB, tpB)) === makerB0 + AMOUNT_B, "maker received exactly B");
+  assert((await bal(FEE, mintB, tpB)) === fee0 + fee, "fee recipient received exactly the fee");
+  assert((await bal(payer.publicKey, mintB, tpB)) === payerB0 - AMOUNT_B - fee, "payer paid exactly B + fee");
+  console.log(`after take: payer A ${await bal(payer.publicKey, mintA, tpA)} | maker B ${await bal(maker.publicKey, mintB, tpB)} | fee ${fee} (${abi.fee.bps} bps)`);
+}
+// ---- offer 2: make then cancel
+{
+  const { offer } = await makeOffer(2n, "another phrase", 1_000_000n, 1n);
+  const before = await bal(maker.publicKey, mintA, tpA);
+  await mustFail("cancel by a stranger", [pw.ixCancel({ maker: payer.publicKey, offer, mintA, tokenProgramA: tpA })], [payer]);
+  await send([pw.ixCancel({ maker: maker.publicKey, offer, mintA, tokenProgramA: tpA })], [maker]);
+  assert((await conn.getAccountInfo(offer)) === null, "offer2 closed");
+  assert((await bal(maker.publicKey, mintA, tpA)) === before + 1_000_000n, "maker refunded");
+  console.log("cancel: ok, maker refunded");
+}
+// ---- offer 3: not_before in the future: cancel refused, take allowed
+{
+  const { offer, claimKp } = await makeOffer(3n, "third phrase here", 2_000_000n, 1_000_000n, 4_102_444_800n);
+  await mustFail("cancel before not_before", [pw.ixCancel({ maker: maker.publicKey, offer, mintA, tokenProgramA: tpA })], [maker]);
+  const o = pw.readOffer((await conn.getAccountInfo(offer)).data);
+  await send([...takeAtas(o), pw.ixTake({ claimKey: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB })], [payer, claimKp]);
+  assert((await conn.getAccountInfo(offer)) === null, "offer3 taken despite not_before");
+  console.log("not_before: cancel refused, take allowed");
+}
+// ---- adversarial takes: hand-built instructions that substitute accounts, wrong mints, the fee account, double take, zero amounts
+{
+  const T = pw.abi.instructions.take;
+  const rawTake = (named) => new web3.TransactionInstruction({ programId: pw.PROGRAM_ID, data: new Uint8Array([T.tag]), keys: T.accounts.map((a) => ({ pubkey: named[a.name], isSigner: a.signer, isWritable: a.writable })) });
+  const { offer, claimKp, vaultAuth, vault } = await makeOffer(4n, "fourth phrase here", 3_000_000n, 1_000_000n);
+  const stranger = web3.Keypair.generate();
+  await conn.confirmTransaction(await conn.requestAirdrop(stranger.publicKey, 1_000_000_000), "confirmed");
+  await send([pw.ixCreateAtaIdempotent(payer.publicKey, stranger.publicKey, mintB, tpB), pw.ixCreateAtaIdempotent(payer.publicKey, stranger.publicKey, mintA, tpA)], [payer]);
+  const base = { claim_key: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer, vault_auth: vaultAuth, mint_a: mintA, mint_b: mintB, vault,
+    payer_ata_a: pw.ata(payer.publicKey, mintA, tpA), payer_ata_b: pw.ata(payer.publicKey, mintB, tpB), maker_ata_b: pw.ata(maker.publicKey, mintB, tpB), fee_ata_b: pw.ata(FEE, mintB, tpB), token_program_a: tpA, token_program_b: tpB };
+  await mustFail("take paying into the attacker's account instead of the maker's", [rawTake({ ...base, maker_ata_b: pw.ata(stranger.publicKey, mintB, tpB) })], [payer, claimKp]);
+  await mustFail("take paying from someone else's account", [rawTake({ ...base, payer_ata_b: pw.ata(stranger.publicKey, mintB, tpB) })], [payer, claimKp]);
+  await mustFail("take naming a different mint", [rawTake({ ...base, mint_b: mintA, payer_ata_b: pw.ata(payer.publicKey, mintA, tpA), maker_ata_b: pw.ata(maker.publicKey, mintA, tpA), fee_ata_b: pw.ata(FEE, mintA, tpA), token_program_b: tpA })], [payer, claimKp]);
+  await mustFail("take releasing to the attacker's account", [rawTake({ ...base, payer_ata_a: pw.ata(stranger.publicKey, mintA, tpA) })], [payer, claimKp]);
+  await mustFail("take routing the fee to the attacker", [rawTake({ ...base, fee_ata_b: pw.ata(stranger.publicKey, mintB, tpB) })], [payer, claimKp]);
+  await mustFail("take with a different vault authority", [rawTake({ ...base, vault_auth: stranger.publicKey })], [payer, claimKp]);
+  await send([rawTake(base)], [payer, claimKp]);
+  await mustFail("second take of a taken offer", [rawTake(base)], [payer, claimKp]);
+  const [offer5] = pw.offerPda(maker.publicKey, 5n);
+  const z = pw.ixMake({ maker: maker.publicKey, seed: 5n, mintA, tokenProgramA: tpA, mintB, amountA: 0n, amountB: 1n, claimKey: claimKp.publicKey });
+  await mustFail("make with a zero amount", [pw.ixCreateAtaIdempotent(maker.publicKey, z.vaultAuth, mintA, tpA), z.ix], [maker]);
+  const m = pw.ixMake({ maker: maker.publicKey, seed: 6n, mintA, tokenProgramA: tpA, mintB, amountA: 1n, amountB: 1n, claimKey: maker.publicKey });
+  await mustFail("make whose claim key is the maker", [pw.ixCreateAtaIdempotent(maker.publicKey, m.vaultAuth, mintA, tpA), m.ix], [maker]);
+  void offer5;
+}
+// ---- custody: the program is one of three keys. Alone, no single party can move the vault; maker + claimer can, with no program at all.
+{
+  const AMT = 5_000_000n;
+  const { offer, claimKp, vaultAuth, vault } = await makeOffer(7n, "seventh phrase here", AMT, 1n);
+  const toMaker = pw.ata(maker.publicKey, mintA, tpA);
+  const xfer = (signers) => pw.ixMultisigTransfer({ tokenProgram: tpA, from: vault, mint: mintA, to: toMaker, authority: vaultAuth, signers, amount: AMT, decimals: decA });
+  await mustFail("maker alone moving the vault", [xfer([maker.publicKey])], [maker]);
+  await mustFail("claimer alone moving the vault", [xfer([claimKp.publicKey])], [payer, claimKp]);
+  const before = await bal(maker.publicKey, mintA, tpA);
+  await send([xfer([maker.publicKey, claimKp.publicKey]), pw.ixMultisigClose({ tokenProgram: tpA, account: vault, dest: maker.publicKey, authority: vaultAuth, signers: [maker.publicKey, claimKp.publicKey] })], [maker, claimKp]);
+  assert((await bal(maker.publicKey, mintA, tpA)) === before + AMT, "maker + claimer recovered the vault without the program");
+  assert((await conn.getAccountInfo(vault)) === null, "vault closed by the parties");
+  console.log("recovery: maker + claimer moved and closed the vault with plain token-program instructions; offer", offer.toBase58().slice(0, 8) + "… is now an empty shell");
+}
+console.log("ALL GREEN");

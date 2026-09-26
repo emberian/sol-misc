@@ -1,0 +1,13 @@
+[package]
+name = "passwap-tools"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Host-side generators: abi.json and golden vectors, derived from the core crate so the JS client has no hand-copied layout."
+
+[[bin]]
+name = "gen-abi"
+path = "src/gen_abi.rs"
+
+[dependencies]
+passwap-core = { path = "../core" }
