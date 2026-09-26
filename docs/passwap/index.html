@@ -149,7 +149,10 @@
     if (!$("paneMake").hidden) makeQuote();
     refreshButtons();
   }
-  async function signAndSend(ixs, extraSigners = []) {
+  // send, then confirm by the effect on chain (`landed` reads the accounts the transaction must change), with the
+  // signature status as a fast path. Public RPC pools can miss a signature they did not themselves receive; they
+  // never miss an account read, so the effect is the truth.
+  async function signAndSend(ixs, extraSigners = [], landed = null) {
     const tx = new web3.Transaction().add(
       web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }),
       web3.ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),  // at most 0.000025 SOL, so the tx is not dropped under load
@@ -161,23 +164,27 @@
     const signed = await provider().signTransaction(tx);
     const raw = signed.serialize();
     const sig = await conn.sendRawTransaction(raw, { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 5 });
-    log(`sent ${sig.slice(0, 12)}… waiting for confirmation`);
-    // resend every 2s until it is seen or its blockhash is past; then check history once more before giving up
     const t0 = Date.now();
-    for (;;) {
-      const st = (await conn.getSignatureStatuses([sig])).value[0];
-      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) { if (st.err) throw new Error("transaction failed on chain: " + JSON.stringify(st.err)); return sig; }
-      const height = await conn.getBlockHeight("confirmed");
-      if (height > lastValidBlockHeight || Date.now() - t0 > 120_000) {
-        const late = (await conn.getSignatureStatuses([sig], { searchTransactionHistory: true })).value[0];
-        if (late && !late.err) return sig;
-        if (late && late.err) throw new Error("transaction failed on chain: " + JSON.stringify(late.err));
-        throw new Error(`transaction ${sig.slice(0, 12)}… was not confirmed before its blockhash expired. nothing moved; try again.`);
+    let status = null, effect = false, pastHeight = false;
+    for (let i = 0; ; i++) {
+      log(`sent ${sig.slice(0, 12)}… waiting for confirmation (${Math.round((Date.now() - t0) / 1000)}s)`);
+      try { status = (await conn.getSignatureStatuses([sig])).value[0]; } catch {}
+      if (status && status.err) throw new Error("transaction failed on chain: " + JSON.stringify(status.err));
+      if (status && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) return sig;
+      if (landed) { try { effect = await landed(); } catch {} if (effect) return sig; }
+      if (!pastHeight) { try { pastHeight = (await conn.getBlockHeight("confirmed")) > lastValidBlockHeight; } catch {} }
+      if (pastHeight ? Date.now() - t0 > 30_000 && i % 5 === 0 : false) {
+        // the blockhash is past: one last look at history and at the effect before saying anything
+        try { const late = (await conn.getSignatureStatuses([sig], { searchTransactionHistory: true })).value[0]; if (late && !late.err) return sig; if (late && late.err) throw new Error("transaction failed on chain: " + JSON.stringify(late.err)); } catch (e) { if (/failed on chain/.test(e.message)) throw e; }
+        if (landed) { try { if (await landed()) return sig; } catch {} }
+        throw new Error(`could not confirm ${sig.slice(0, 12)}… from this rpc. it may still have landed: check your wallet or the explorer before trying again.`);
       }
-      try { await conn.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch {}
+      if (!pastHeight) { try { await conn.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch {} }
+      if (Date.now() - t0 > 240_000) throw new Error(`still unconfirmed after four minutes (${sig.slice(0, 12)}…). check your wallet or the explorer before trying again.`);
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
+  const vaultAmount = async (vault) => { const vi = await conn.getAccountInfo(vault); return vi && vi.data.length >= 72 ? new DataView(vi.data.buffer, vi.data.byteOffset).getBigUint64(64, true) : null; };
   const tokenProgramOf = async (mint) => { const info = await conn.getAccountInfo(mint); if (!info) throw new Error("mint not found: " + mint.toBase58()); return info.owner; };
   const decimalsOf = async (mint) => (await conn.getAccountInfo(mint)).data[44];
   const fmt = (amount, dec) => { const s = amount.toString().padStart(dec + 1, "0"); return (s.slice(0, -dec) + "." + s.slice(-dec)).replace(/\.?0+$/, ""); };
@@ -259,7 +266,8 @@
         pw.ixCreateAtaIdempotent(wallet, pw.FEE_RECIPIENT, o.mintB, tpB),
         pw.ixTake({ claimKey: claimKp.publicKey, payer: wallet, maker: o.maker, offer: addr, mintA: o.mintA, mintB: o.mintB, tokenProgramA: tpA, tokenProgramB: tpB, takeA, payB }),
       ];
-      const sig = await signAndSend(ixs, [claimKp]);
+      const vault = pw.ata(o.vaultAuth, o.mintA, tpA);
+      const sig = await signAndSend(ixs, [claimKp], async () => { const now = await vaultAmount(vault); return now === null || now < remaining; });
       log(`claimed. <a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
       offerCache = null; $("offerView").hidden = true; $("takeBox").hidden = true;
     } catch (e) { log("failed: " + (e.message || e), "bad"); }
@@ -283,7 +291,7 @@
       log("deriving claim key…");
       const kp = await pw.deriveClaimKeypair(pass, offer);
       const { ix, vaultAuth } = pw.ixMake({ maker: wallet, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: new PublicKey(kp.publicKey), notBefore });
-      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, vaultAuth, mintA, tpA), pw.ixCreateAtaIdempotent(wallet, pw.FEE_RECIPIENT, mintA, tpA), ix]);
+      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, vaultAuth, mintA, tpA), pw.ixCreateAtaIdempotent(wallet, pw.FEE_RECIPIENT, mintA, tpA), ix], [], async () => { const i = await conn.getAccountInfo(offer); return !!(i && i.data.length === abi.offer.len); });
       log(`offer created.\noffer address: <span class="mono ok">${offer.toBase58()}</span>\nshare the passphrase privately with the claimer, and this link:\n<span class="mono">${location.origin}${location.pathname}?offer=${offer.toBase58()}</span>\n<a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
     } catch (e) { log("failed: " + (e.message || e), "bad"); }
     finally { $("makeBtn").disabled = false; }
@@ -296,7 +304,7 @@
       const o = pw.readOffer(info.data);
       if (!o.maker.equals(wallet)) throw new Error("this wallet is not the maker");
       const tpA = await tokenProgramOf(o.mintA);
-      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, wallet, o.mintA, tpA), pw.ixCancel({ maker: wallet, offer: addr, mintA: o.mintA, tokenProgramA: tpA })]);
+      const sig = await signAndSend([pw.ixCreateAtaIdempotent(wallet, wallet, o.mintA, tpA), pw.ixCancel({ maker: wallet, offer: addr, mintA: o.mintA, tokenProgramA: tpA })], [], async () => (await conn.getAccountInfo(addr)) === null);
       log(`cancelled, tokens returned. <a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
     } catch (e) { log("failed: " + (e.message || e), "bad"); }
   }
