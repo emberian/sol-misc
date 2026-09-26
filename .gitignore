@@ -1,4 +1,5 @@
 target/
 node_modules/
 *.so
+!docs/otc/dregg_otc.so
 .DS_Store

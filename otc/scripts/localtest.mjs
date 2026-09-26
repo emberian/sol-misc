@@ -103,4 +103,31 @@ const [offer2] = otc.offerPda(maker.publicKey, seed2);
   assert((await conn.getAccountInfo(offer3)) === null, "offer3 taken despite not_before");
   console.log("not_before: cancel refused, take allowed");
 }
+// ---- negative tests: hand-built instructions that substitute accounts, wrong mints, double take, zero amounts
+{
+  const T = otc.abi.instructions.take;
+  const rawTake = (named) => new web3.TransactionInstruction({ programId: otc.PROGRAM_ID, data: new Uint8Array([T.tag]), keys: T.accounts.map((a) => ({ pubkey: named[a.name], isSigner: a.signer, isWritable: a.writable })) });
+  const seed4 = 4n; const [offer4] = otc.offerPda(maker.publicKey, seed4);
+  const claim4 = await otc.deriveClaimKeypair("fourth phrase here", offer4); const claimKp = web3.Keypair.fromSecretKey(claim4.secretKey);
+  const { ix } = otc.ixMake({ maker: maker.publicKey, seed: seed4, mintA, tokenProgramA: tpA, mintB, amountA: 3_000_000n, amountB: 1_000_000n, claimKey: new web3.PublicKey(claim4.publicKey) });
+  await send([otc.ixCreateAtaIdempotent(maker.publicKey, offer4, mintA, tpA), ix], [maker]);
+  const stranger = web3.Keypair.generate();
+  await conn.confirmTransaction(await conn.requestAirdrop(stranger.publicKey, 1_000_000_000), "confirmed");
+  await send([otc.ixCreateAtaIdempotent(payer.publicKey, stranger.publicKey, mintB, tpB), otc.ixCreateAtaIdempotent(payer.publicKey, stranger.publicKey, mintA, tpA)], [payer]);
+  const base = { claim_key: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer: offer4, mint_a: mintA, mint_b: mintB,
+    vault: otc.ata(offer4, mintA, tpA), payer_ata_a: otc.ata(payer.publicKey, mintA, tpA), payer_ata_b: otc.ata(payer.publicKey, mintB, tpB), maker_ata_b: otc.ata(maker.publicKey, mintB, tpB), token_program_a: tpA, token_program_b: tpB };
+  const mustFail = async (name, named, signers) => { let f = false; try { await send([rawTake(named)], signers); } catch { f = true; } assert(f, name + " must be refused"); console.log("refused:", name); };
+  await mustFail("take paying into the attacker's account instead of the maker's", { ...base, maker_ata_b: otc.ata(stranger.publicKey, mintB, tpB) }, [payer, claimKp]);
+  await mustFail("take paying from someone else's account", { ...base, payer_ata_b: otc.ata(stranger.publicKey, mintB, tpB) }, [payer, claimKp]);
+  await mustFail("take naming a different mint", { ...base, mint_b: mintA, payer_ata_b: otc.ata(payer.publicKey, mintA, tpA), maker_ata_b: otc.ata(maker.publicKey, mintA, tpA), token_program_b: tpA }, [payer, claimKp]);
+  await mustFail("take releasing to the attacker's account", { ...base, payer_ata_a: otc.ata(stranger.publicKey, mintA, tpA) }, [payer, claimKp]);
+  // the honest take, then a second take must fail (offer closed)
+  await send([rawTake(base)], [payer, claimKp]);
+  await mustFail("second take of a taken offer", base, [payer, claimKp]);
+  // make with a zero amount
+  const seed5 = 5n; const [offer5] = otc.offerPda(maker.publicKey, seed5);
+  const z = otc.ixMake({ maker: maker.publicKey, seed: seed5, mintA, tokenProgramA: tpA, mintB, amountA: 0n, amountB: 1n, claimKey: claimKp.publicKey });
+  let zf = false; try { await send([otc.ixCreateAtaIdempotent(maker.publicKey, offer5, mintA, tpA), z.ix], [maker]); } catch { zf = true; }
+  assert(zf, "make with zero amount must be refused"); console.log("refused: make with a zero amount");
+}
 console.log("ALL GREEN");

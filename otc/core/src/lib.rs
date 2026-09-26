@@ -156,6 +156,45 @@ impl<'a> Offer<'a> {
     }
 }
 
+/// Field views of an offer record by offset. These are how the conditions below talk about the
+/// offer *before* it is decoded, so soundness and completeness can be stated over the same predicate.
+pub open spec fn is_offer_record(d: Seq<u8>) -> bool { d.len() == OFFER_LEN && d[0] == OFFER_VERSION }
+pub open spec fn rec_bump(d: Seq<u8>) -> u8 { d[1] }
+pub open spec fn rec_seed(d: Seq<u8>) -> u64 { spec_u64_from_le_bytes(d.subrange(2, 10)) }
+pub open spec fn rec_maker(d: Seq<u8>) -> Seq<u8> { d.subrange(10, 42) }
+pub open spec fn rec_claim_key(d: Seq<u8>) -> Seq<u8> { d.subrange(42, 74) }
+pub open spec fn rec_mint_a(d: Seq<u8>) -> Seq<u8> { d.subrange(74, 106) }
+pub open spec fn rec_mint_b(d: Seq<u8>) -> Seq<u8> { d.subrange(106, 138) }
+pub open spec fn rec_amount_a(d: Seq<u8>) -> u64 { spec_u64_from_le_bytes(d.subrange(138, 146)) }
+pub open spec fn rec_amount_b(d: Seq<u8>) -> u64 { spec_u64_from_le_bytes(d.subrange(146, 154)) }
+pub open spec fn rec_not_before(d: Seq<u8>) -> u64 { spec_u64_from_le_bytes(d.subrange(154, 162)) }
+
+/// An offer's fields are its record's field views.
+pub proof fn lemma_offer_fields(o: &Offer)
+    requires o.wf(),
+    ensures
+        is_offer_record(o.bytes()),
+        rec_bump(o.bytes()) == o.bump, rec_seed(o.bytes()) == o.seed,
+        rec_maker(o.bytes()) == o.maker@, rec_claim_key(o.bytes()) == o.claim_key@,
+        rec_mint_a(o.bytes()) == o.mint_a@, rec_mint_b(o.bytes()) == o.mint_b@,
+        rec_amount_a(o.bytes()) == o.amount_a, rec_amount_b(o.bytes()) == o.amount_b, rec_not_before(o.bytes()) == o.not_before,
+{
+    lemma_auto_spec_u64_to_from_le_bytes();
+    let b = o.bytes();
+    assert(spec_u64_to_le_bytes(o.seed).len() == 8);
+    assert(spec_u64_to_le_bytes(o.amount_a).len() == 8);
+    assert(spec_u64_to_le_bytes(o.amount_b).len() == 8);
+    assert(spec_u64_to_le_bytes(o.not_before).len() == 8);
+    assert(b.subrange(2, 10) =~= spec_u64_to_le_bytes(o.seed));
+    assert(b.subrange(10, 42) =~= o.maker@);
+    assert(b.subrange(42, 74) =~= o.claim_key@);
+    assert(b.subrange(74, 106) =~= o.mint_a@);
+    assert(b.subrange(106, 138) =~= o.mint_b@);
+    assert(b.subrange(138, 146) =~= spec_u64_to_le_bytes(o.amount_a));
+    assert(b.subrange(146, 154) =~= spec_u64_to_le_bytes(o.amount_b));
+    assert(b.subrange(154, 162) =~= spec_u64_to_le_bytes(o.not_before));
+}
+
 pub fn encode_offer(o: &Offer) -> (out: [u8; OFFER_LEN])
     requires o.wf(),
     ensures out@ == o.bytes(),
@@ -357,29 +396,32 @@ pub struct MakeFacts<'a> {
 }
 pub struct MakePlan<'a> { pub offer: Offer<'a>, pub offer_bytes: [u8; OFFER_LEN], pub fund: Transfer<'a> }
 
+/// Everything a make needs to be admitted, stated over the facts alone.
+pub open spec fn make_conditions(f: &MakeFacts, a: &MakeArgs) -> bool {
+    &&& f.maker.is_signer
+    &&& f.offer_is_empty
+    &&& f.pda@ == f.offer_key@
+    &&& f.system_program@ == SYSTEM_PROGRAM@
+    &&& is_token_program(f.mint_a.program@)
+    &&& f.token_program_a@ == f.mint_a.program@
+    &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
+    &&& token_ok(&f.vault, f.offer_key@, f.mint_a.key@, f.mint_a.program@)
+    &&& a.amount_a > 0 && a.amount_b > 0
+}
+/// What a make plan is, given the facts and the arguments: the offer it records and the one funding move.
+pub open spec fn make_plan_is(f: &MakeFacts, a: &MakeArgs, p: &MakePlan) -> bool {
+    &&& p.offer.wf()
+    &&& p.offer.bump == f.bump && p.offer.seed == a.seed && p.offer.maker@ == f.maker.key@
+    &&& p.offer.claim_key@ == a.claim_key@ && p.offer.mint_a@ == f.mint_a.key@ && p.offer.mint_b@ == a.mint_b@
+    &&& p.offer.amount_a == a.amount_a && p.offer.amount_b == a.amount_b && p.offer.not_before == a.not_before
+    &&& p.offer_bytes@ == p.offer.bytes()
+    &&& transfer_is(&p.fund, f.mint_a.program@, f.maker_ata_a.key@, f.mint_a.key@, f.vault.key@, f.maker.key@, false, a.amount_a, f.mint_a.decimals)
+}
+
 pub fn decide_make<'a>(f: &MakeFacts<'a>, a: &MakeArgs<'a>) -> (r: Option<MakePlan<'a>>)
     requires a.wf(), is_key(f.maker.key@), is_key(f.mint_a.key@),
     ensures
-        match r {
-            None => true,
-            Some(p) => {
-                &&& f.maker.is_signer
-                &&& f.offer_is_empty
-                &&& f.pda@ == f.offer_key@
-                &&& f.system_program@ == SYSTEM_PROGRAM@
-                &&& is_token_program(f.mint_a.program@)
-                &&& f.token_program_a@ == f.mint_a.program@
-                &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
-                &&& token_ok(&f.vault, f.offer_key@, f.mint_a.key@, f.mint_a.program@)
-                &&& a.amount_a > 0 && a.amount_b > 0
-                &&& p.offer.wf()
-                &&& p.offer.bump == f.bump && p.offer.seed == a.seed && p.offer.maker@ == f.maker.key@
-                &&& p.offer.claim_key@ == a.claim_key@ && p.offer.mint_a@ == f.mint_a.key@ && p.offer.mint_b@ == a.mint_b@
-                &&& p.offer.amount_a == a.amount_a && p.offer.amount_b == a.amount_b && p.offer.not_before == a.not_before
-                &&& p.offer_bytes@ == p.offer.bytes()
-                &&& transfer_is(&p.fund, f.mint_a.program@, f.maker_ata_a.key@, f.mint_a.key@, f.vault.key@, f.maker.key@, false, a.amount_a, f.mint_a.decimals)
-            },
-        },
+        match r { None => !make_conditions(f, a), Some(p) => make_conditions(f, a) && make_plan_is(f, a, &p) },
 {
     if !f.maker.is_signer || !f.offer_is_empty { return None; }
     if !bytes_eq(f.pda, f.offer_key) { return None; }
@@ -419,33 +461,39 @@ pub struct TakeFacts<'a> {
 }
 pub struct TakePlan<'a> { pub offer: Offer<'a>, pub pay: Transfer<'a>, pub release: Transfer<'a>, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
 
+/// Everything a take needs to be admitted, stated over the facts and the offer record's bytes.
+pub open spec fn take_conditions(f: &TakeFacts) -> bool {
+    let d = f.offer.data@;
+    &&& f.claim.is_signer && f.payer.is_signer
+    &&& f.offer.owned_by_program && f.offer.pda_ok
+    &&& is_offer_record(d)
+    &&& rec_claim_key(d) == f.claim.key@
+    &&& rec_maker(d) == f.maker_key@
+    &&& rec_mint_a(d) == f.mint_a.key@ && rec_mint_b(d) == f.mint_b.key@
+    &&& is_token_program(f.mint_a.program@) && f.token_program_a@ == f.mint_a.program@
+    &&& is_token_program(f.mint_b.program@) && f.token_program_b@ == f.mint_b.program@
+    &&& token_ok(&f.vault, f.offer.key@, f.mint_a.key@, f.mint_a.program@)
+    &&& token_ok(&f.payer_ata_a, f.payer.key@, f.mint_a.key@, f.mint_a.program@)
+    &&& token_ok(&f.payer_ata_b, f.payer.key@, f.mint_b.key@, f.mint_b.program@)
+    &&& token_ok(&f.maker_ata_b, f.maker_key@, f.mint_b.key@, f.mint_b.program@)
+}
+/// What a take plan is: the decoded offer, the payment, the release, the vault close, the rent refund.
+pub open spec fn take_plan_is(f: &TakeFacts, p: &TakePlan) -> bool {
+    &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
+    &&& transfer_is(&p.pay, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.maker_ata_b.key@, f.payer.key@, false, p.offer.amount_b, f.mint_b.decimals)
+    &&& transfer_is(&p.release, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.payer_ata_a.key@, f.offer.key@, true, p.offer.amount_a, f.mint_a.decimals)
+    &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.payer.key@)
+    &&& p.offer_rent_to@ == f.maker_key@
+}
+
 pub fn decide_take<'a>(f: &TakeFacts<'a>) -> (r: Option<TakePlan<'a>>)
     ensures
-        match r {
-            None => true,
-            Some(p) => {
-                &&& f.claim.is_signer && f.payer.is_signer
-                &&& f.offer.owned_by_program && f.offer.pda_ok
-                &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
-                &&& p.offer.claim_key@ == f.claim.key@
-                &&& p.offer.maker@ == f.maker_key@
-                &&& p.offer.mint_a@ == f.mint_a.key@ && p.offer.mint_b@ == f.mint_b.key@
-                &&& is_token_program(f.mint_a.program@) && f.token_program_a@ == f.mint_a.program@
-                &&& is_token_program(f.mint_b.program@) && f.token_program_b@ == f.mint_b.program@
-                &&& token_ok(&f.vault, f.offer.key@, f.mint_a.key@, f.mint_a.program@)
-                &&& token_ok(&f.payer_ata_a, f.payer.key@, f.mint_a.key@, f.mint_a.program@)
-                &&& token_ok(&f.payer_ata_b, f.payer.key@, f.mint_b.key@, f.mint_b.program@)
-                &&& token_ok(&f.maker_ata_b, f.maker_key@, f.mint_b.key@, f.mint_b.program@)
-                &&& transfer_is(&p.pay, f.mint_b.program@, f.payer_ata_b.key@, f.mint_b.key@, f.maker_ata_b.key@, f.payer.key@, false, p.offer.amount_b, f.mint_b.decimals)
-                &&& transfer_is(&p.release, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.payer_ata_a.key@, f.offer.key@, true, p.offer.amount_a, f.mint_a.decimals)
-                &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.payer.key@)
-                &&& p.offer_rent_to@ == f.maker_key@
-            },
-        },
+        match r { None => !take_conditions(f), Some(p) => take_conditions(f) && take_plan_is(f, &p) },
 {
     if !f.claim.is_signer || !f.payer.is_signer { return None; }
     if !f.offer.owned_by_program || !f.offer.pda_ok { return None; }
     let offer = match decode_offer(f.offer.data) { Some(o) => o, None => { return None; } };
+    proof { lemma_offer_fields(&offer); }
     if !bytes_eq(offer.claim_key, f.claim.key) { return None; }
     if !bytes_eq(offer.maker, f.maker_key) { return None; }
     if !bytes_eq(offer.mint_a, f.mint_a.key) { return None; }
@@ -482,29 +530,35 @@ pub struct CancelFacts<'a> {
 }
 pub struct CancelPlan<'a> { pub offer: Offer<'a>, pub refund: Transfer<'a>, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
 
+/// Everything a cancel needs to be admitted.
+pub open spec fn cancel_conditions(f: &CancelFacts) -> bool {
+    let d = f.offer.data@;
+    &&& f.maker.is_signer
+    &&& f.offer.owned_by_program && f.offer.pda_ok
+    &&& is_offer_record(d)
+    &&& rec_maker(d) == f.maker.key@
+    &&& rec_mint_a(d) == f.mint_a.key@
+    &&& f.now >= rec_not_before(d)
+    &&& is_token_program(f.mint_a.program@) && f.token_program_a@ == f.mint_a.program@
+    &&& token_ok(&f.vault, f.offer.key@, f.mint_a.key@, f.mint_a.program@)
+    &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
+}
+/// What a cancel plan is: the decoded offer, the refund, the vault close, the rent refund.
+pub open spec fn cancel_plan_is(f: &CancelFacts, p: &CancelPlan) -> bool {
+    &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
+    &&& transfer_is(&p.refund, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.maker_ata_a.key@, f.offer.key@, true, p.offer.amount_a, f.mint_a.decimals)
+    &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.maker.key@)
+    &&& p.offer_rent_to@ == f.maker.key@
+}
+
 pub fn decide_cancel<'a>(f: &CancelFacts<'a>) -> (r: Option<CancelPlan<'a>>)
     ensures
-        match r {
-            None => true,
-            Some(p) => {
-                &&& f.maker.is_signer
-                &&& f.offer.owned_by_program && f.offer.pda_ok
-                &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
-                &&& p.offer.maker@ == f.maker.key@
-                &&& p.offer.mint_a@ == f.mint_a.key@
-                &&& f.now >= p.offer.not_before
-                &&& is_token_program(f.mint_a.program@) && f.token_program_a@ == f.mint_a.program@
-                &&& token_ok(&f.vault, f.offer.key@, f.mint_a.key@, f.mint_a.program@)
-                &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
-                &&& transfer_is(&p.refund, f.mint_a.program@, f.vault.key@, f.mint_a.key@, f.maker_ata_a.key@, f.offer.key@, true, p.offer.amount_a, f.mint_a.decimals)
-                &&& close_is(&p.close_vault, f.mint_a.program@, f.vault.key@, f.maker.key@)
-                &&& p.offer_rent_to@ == f.maker.key@
-            },
-        },
+        match r { None => !cancel_conditions(f), Some(p) => cancel_conditions(f) && cancel_plan_is(f, &p) },
 {
     if !f.maker.is_signer { return None; }
     if !f.offer.owned_by_program || !f.offer.pda_ok { return None; }
     let offer = match decode_offer(f.offer.data) { Some(o) => o, None => { return None; } };
+    proof { lemma_offer_fields(&offer); }
     if !bytes_eq(offer.maker, f.maker.key) { return None; }
     if !bytes_eq(offer.mint_a, f.mint_a.key) { return None; }
     if f.now < offer.not_before { return None; }
@@ -564,6 +618,109 @@ pub proof fn lemma_offer_roundtrip(o: Offer, d: Offer)
     assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(o.not_before)) == o.not_before);
     assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(d.not_before)) == d.not_before);
 }
+
+
+// ───────────────────────────── an abstract ledger, and what a plan does to it ─────────────────────────────
+// A ledger maps a token-account key to its balance. `transfer_checked` moves `amount` from `from`
+// to `to`. Stated with signed deltas so the theorems hold even when two named accounts coincide.
+
+pub type Ledger = Map<Seq<u8>, int>;
+
+pub open spec fn apply_transfer(l: Ledger, t: &Transfer) -> Ledger {
+    let after_from = l.insert(t.from@, l[t.from@] - t.amount);
+    after_from.insert(t.to@, after_from[t.to@] + t.amount)
+}
+pub open spec fn delta(l0: Ledger, l1: Ledger, k: Seq<u8>) -> int { l1[k] - l0[k] }
+/// The signed change one transfer makes at key `k`.
+pub open spec fn transfer_delta(t: &Transfer, k: Seq<u8>) -> int {
+    (if k == t.from@ { -(t.amount as int) } else { 0 }) + (if k == t.to@ { t.amount as int } else { 0 })
+}
+
+pub proof fn lemma_transfer_delta(l: Ledger, t: &Transfer, k: Seq<u8>)
+    requires l.dom().contains(t.from@), l.dom().contains(t.to@), l.dom().contains(k),
+    ensures apply_transfer(l, t).dom() == l.dom(), delta(l, apply_transfer(l, t), k) == transfer_delta(t, k),
+{
+    assert(apply_transfer(l, t).dom() =~= l.dom());
+}
+
+/// After a take: the claimer paid exactly the price, the maker received exactly the price, the vault
+/// gave up exactly the deposit, the claimer received exactly the deposit, and nothing else moved.
+pub proof fn theorem_take_effect(f: &TakeFacts, p: &TakePlan, l: Ledger, k: Seq<u8>)
+    requires
+        take_conditions(f), take_plan_is(f, p),
+        l.dom().contains(f.payer_ata_b.key@), l.dom().contains(f.maker_ata_b.key@),
+        l.dom().contains(f.vault.key@), l.dom().contains(f.payer_ata_a.key@), l.dom().contains(k),
+    ensures
+        delta(l, apply_transfer(apply_transfer(l, &p.pay), &p.release), k)
+            == (if k == f.payer_ata_b.key@ { -(p.offer.amount_b as int) } else { 0 })
+             + (if k == f.maker_ata_b.key@ { p.offer.amount_b as int } else { 0 })
+             + (if k == f.vault.key@ { -(p.offer.amount_a as int) } else { 0 })
+             + (if k == f.payer_ata_a.key@ { p.offer.amount_a as int } else { 0 }),
+{
+    let l1 = apply_transfer(l, &p.pay);
+    lemma_transfer_delta(l, &p.pay, k);
+    lemma_transfer_delta(l1, &p.release, k);
+}
+
+/// After a cancel: the vault gave up exactly the deposit, the maker received exactly the deposit, nothing else moved.
+pub proof fn theorem_cancel_effect(f: &CancelFacts, p: &CancelPlan, l: Ledger, k: Seq<u8>)
+    requires
+        cancel_conditions(f), cancel_plan_is(f, p),
+        l.dom().contains(f.vault.key@), l.dom().contains(f.maker_ata_a.key@), l.dom().contains(k),
+    ensures
+        delta(l, apply_transfer(l, &p.refund), k)
+            == (if k == f.vault.key@ { -(p.offer.amount_a as int) } else { 0 }) + (if k == f.maker_ata_a.key@ { p.offer.amount_a as int } else { 0 }),
+{
+    lemma_transfer_delta(l, &p.refund, k);
+}
+
+/// After a make: the maker's account gave up exactly the deposit, the vault received exactly the deposit, nothing else moved.
+pub proof fn theorem_make_effect(f: &MakeFacts, a: &MakeArgs, p: &MakePlan, l: Ledger, k: Seq<u8>)
+    requires
+        make_conditions(f, a), make_plan_is(f, a, p),
+        l.dom().contains(f.maker_ata_a.key@), l.dom().contains(f.vault.key@), l.dom().contains(k),
+    ensures
+        delta(l, apply_transfer(l, &p.fund), k)
+            == (if k == f.maker_ata_a.key@ { -(a.amount_a as int) } else { 0 }) + (if k == f.vault.key@ { a.amount_a as int } else { 0 }),
+{
+    lemma_transfer_delta(l, &p.fund, k);
+}
+
+// ───────────────────────────── named properties (PROPERTIES.md) ─────────────────────────────
+// Each is one line of consequence from the decision specs. Read the names; Verus checks the bodies.
+
+/// P1. No take without the claim key's signature.
+pub proof fn take_needs_the_claim_signature(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p) ensures f.claim.is_signer {}
+/// P2. The claim key that must sign is the one recorded in the offer.
+pub proof fn take_checks_the_recorded_claim_key(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p) ensures f.claim.key@ == p.offer.claim_key@ { lemma_offer_fields(&p.offer); }
+/// P3. The claimer pays exactly the recorded price, from their own account, to the maker's own account for that mint.
+pub proof fn take_pays_exactly_the_price(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.pay.amount == p.offer.amount_b, p.pay.from@ == f.payer_ata_b.key@, p.pay.to@ == f.maker_ata_b.key@,
+        f.payer_ata_b.authority@ == f.payer.key@, f.maker_ata_b.authority@ == f.maker_key@, p.pay.mint@ == p.offer.mint_b@ { lemma_offer_fields(&p.offer); }
+/// P4. The claimer receives exactly the recorded deposit, into their own account for that mint, out of the vault.
+pub proof fn take_releases_exactly_the_deposit(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.release.amount == p.offer.amount_a, p.release.from@ == f.vault.key@, p.release.to@ == f.payer_ata_a.key@,
+        f.payer_ata_a.authority@ == f.payer.key@, p.release.mint@ == p.offer.mint_a@ { lemma_offer_fields(&p.offer); }
+/// P5. The only authorities a plan ever uses are the payer over the payer's own account and the offer PDA over its vault.
+pub proof fn take_moves_only_the_parties_own_funds(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p)
+    ensures p.pay.authority@ == f.payer.key@ && !p.pay.authority_is_offer, p.release.authority@ == f.offer.key@ && p.release.authority_is_offer, f.vault.authority@ == f.offer.key@ {}
+/// P6. A take pays the offer's maker, and only the maker, the offer's own rent.
+pub proof fn take_refunds_rent_to_the_maker(f: &TakeFacts, p: &TakePlan) requires take_conditions(f), take_plan_is(f, p) ensures p.offer_rent_to@ == p.offer.maker@ { lemma_offer_fields(&p.offer); }
+/// P7. Only the maker can cancel, and only once `not_before` has passed.
+pub proof fn cancel_is_the_makers_alone_and_waits(f: &CancelFacts, p: &CancelPlan) requires cancel_conditions(f), cancel_plan_is(f, p)
+    ensures f.maker.is_signer, f.maker.key@ == p.offer.maker@, f.now >= p.offer.not_before { lemma_offer_fields(&p.offer); }
+/// P8. A cancel refunds exactly the deposit to the maker's own account for that mint.
+pub proof fn cancel_refunds_exactly_the_deposit(f: &CancelFacts, p: &CancelPlan) requires cancel_conditions(f), cancel_plan_is(f, p)
+    ensures p.refund.amount == p.offer.amount_a, p.refund.to@ == f.maker_ata_a.key@, f.maker_ata_a.authority@ == f.maker.key@ { lemma_offer_fields(&p.offer); }
+/// P9. A make records exactly what was asked and funds the vault with exactly the deposit from the maker's own account.
+pub proof fn make_records_what_was_asked(f: &MakeFacts, a: &MakeArgs, p: &MakePlan) requires make_conditions(f, a), make_plan_is(f, a, p)
+    ensures p.offer.amount_a == a.amount_a, p.offer.amount_b == a.amount_b, p.offer.claim_key@ == a.claim_key@, p.offer.not_before == a.not_before,
+        p.fund.amount == a.amount_a, p.fund.from@ == f.maker_ata_a.key@, f.maker_ata_a.authority@ == f.maker.key@, p.fund.to@ == f.vault.key@ {}
+/// P10. An offer that has been closed (no data) admits neither a take nor a cancel.
+pub proof fn closed_offers_are_dead(t: &TakeFacts, c: &CancelFacts) requires t.offer.data@.len() == 0, c.offer.data@.len() == 0 ensures !take_conditions(t), !cancel_conditions(c) {}
+// P11. A legitimate take is never refused (completeness): this is the `None => !take_conditions(f)`
+// arm of `decide_take`'s postcondition, and likewise for make and cancel. It is a property of the
+// executable decision itself, so it lives on the function rather than as a separate lemma.
 
 } // verus!
 
