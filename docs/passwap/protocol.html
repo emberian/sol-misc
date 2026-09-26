@@ -112,7 +112,7 @@ spl-token close --address &lt;VAULT&gt; --owner &lt;VAULT_AUTHORITY&gt; \
   <ul>
     <li>program <span class="mono" id="programId"></span>. every page takes <code>?program=</code>.</li>
     <li>the deploy page's binary is CI's build; CI prints its sha256. compare: <code>solana program dump &lt;PROGRAM_ID&gt; x.so &amp;&amp; sha256sum x.so</code>.</li>
-    <li>the upgrade authority can replace code, not custody. it will be set to <i>none</i> once the design settles, making the program immutable.</li>
+    <li>the program is <b>immutable</b>: its upgrade authority is none. this code is the code. even an authority could only ever have replaced code, not custody.</li>
     <li><a href="https://github.com/emberian/sol-misc/tree/main/passwap">source, proofs, tests</a> · <a href="explorer.html">explorer</a></li>
   </ul>
 
