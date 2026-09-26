@@ -1,21 +1,19 @@
-//! dregg-otc core: the pure part of the escrow, verified with Verus.
+//! dregg-otc core: the pure part of the escrow, verified with Verus. No allocator, no `Vec`:
+//! every key is a 32-byte view into memory the adapter owns, the offer is a fixed 162-byte record,
+//! and a plan is a fixed set of moves.
 //!
-//! Nothing here touches the chain. The SBF adapter (`../program`) gathers *facts* about the
-//! accounts a transaction presents (keys, owner programs, signer flags, parsed token-account
-//! fields, and the derived addresses it computed) and hands them to `decide_make`,
-//! `decide_take`, `decide_cancel`. Each returns either `None` (refuse) or a *plan*: the exact
-//! token moves and closes to execute. The postconditions say what a plan implies about the
-//! facts, so the adapter's only job is to execute the plan faithfully.
+//! The SBF adapter (`../program`) gathers *facts* about the accounts a transaction presents (keys,
+//! owner programs, signer flags, parsed token-account fields, the addresses it derived, the clock)
+//! and hands them to `decide_make`, `decide_take`, `decide_cancel`. Each returns either `None`
+//! (refuse) or a *plan*: the exact token moves and closes to execute. The postconditions say what
+//! a plan implies about the facts, so the adapter's only job is to execute the plan faithfully.
 //!
-//! Byte layouts (offer account, instruction data) are defined once here with encode/decode
-//! pairs whose specs pin them down; `../tools` derives abi.json and golden vectors from this
-//! crate so the JS client has no hand-copied layout.
+//! Byte layouts (offer account, instruction data) are defined once here with encode/decode pairs
+//! whose specs pin them down; `../tools` derives abi.json and golden vectors from this crate.
 #![no_std]
 #![allow(unused_imports)]
 #![allow(unused_braces)]
-extern crate alloc;
 
-use alloc::vec::Vec;
 use vstd::prelude::*;
 use vstd::bytes::*;
 use vstd::slice::*;
@@ -26,8 +24,9 @@ verus! {
 // ───────────────────────────── constants ─────────────────────────────
 
 pub const OFFER_VERSION: u8 = 1;
-pub const OFFER_LEN: usize = 154;
-pub const MAKE_ARGS_LEN: usize = 88;
+pub const OFFER_LEN: usize = 162;
+pub const MAKE_ARGS_LEN: usize = 96;
+pub const MAKE_IX_LEN: usize = 97;
 pub const KEY_LEN: usize = 32;
 pub const TOKEN_ACCOUNT_MIN_LEN: usize = 72;
 pub const MINT_DECIMALS_OFFSET: usize = 44;
@@ -63,64 +62,84 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> (r: bool)
     true
 }
 
-/// Append `src` to `dst`.
-pub fn push_all(dst: &mut Vec<u8>, src: &[u8])
-    ensures final(dst)@ == old(dst)@ + src@,
-{
-    let mut i: usize = 0;
-    while i < src.len()
-        invariant i <= src.len(), dst@ == old(dst)@ + src@.subrange(0, i as int),
-        decreases src.len() - i,
-    {
-        dst.push(*slice_index_get(src, i));
-        proof { assert(old(dst)@ + src@.subrange(0, i as int) + seq![src@[i as int]] =~= old(dst)@ + src@.subrange(0, i as int + 1)); }
-        i += 1;
-    }
-    proof { assert(src@.subrange(0, src@.len() as int) =~= src@); }
-}
-
-/// A fresh copy of `src[i..i+32]`.
-pub fn key_at(src: &[u8], i: usize) -> (out: Vec<u8>)
+/// The 32-byte view `src[i..i+32]`.
+pub fn key_at<'a>(src: &'a [u8], i: usize) -> (out: &'a [u8])
     requires i + KEY_LEN <= src@.len(),
     ensures out@ == src@.subrange(i as int, i as int + KEY_LEN as int), is_key(out@),
 {
     let _n = src.len();
     proof { assert(i + KEY_LEN <= _n); }
-    slice_to_vec(slice_subrange(src, i, i + KEY_LEN))
+    slice_subrange(src, i, i + KEY_LEN)
 }
 
-pub fn copy_key(k: &Vec<u8>) -> (out: Vec<u8>)
-    ensures out@ == k@,
-{
-    slice_to_vec(k.as_slice())
-}
-
-pub fn key_is(k: &Vec<u8>, program: &[u8; 32]) -> (r: bool)
+pub fn key_is(k: &[u8], program: &[u8; 32]) -> (r: bool)
     ensures r == (k@ == program@),
 {
-    bytes_eq(k.as_slice(), array_as_slice(program))
+    bytes_eq(k, array_as_slice(program))
 }
 
-pub fn token_program_ok(k: &Vec<u8>) -> (r: bool)
+pub fn token_program_ok(k: &[u8]) -> (r: bool)
     ensures r == is_token_program(k@),
 {
     key_is(k, &TOKEN_PROGRAM) || key_is(k, &TOKEN_2022_PROGRAM)
 }
 
-// ───────────────────────────── the offer account ─────────────────────────────
-
-pub struct Offer {
-    pub bump: u8,
-    pub seed: u64,
-    pub maker: Vec<u8>,
-    pub claim_key: Vec<u8>,
-    pub mint_a: Vec<u8>,
-    pub mint_b: Vec<u8>,
-    pub amount_a: u64,
-    pub amount_b: u64,
+/// Write `src` (32 bytes) into `out[off..off+32]`.
+fn put_key<const N: usize>(out: &mut [u8; N], off: usize, src: &[u8])
+    requires is_key(src@), off + KEY_LEN <= N,
+    ensures
+        final(out)@.subrange(off as int, off as int + KEY_LEN as int) == src@,
+        forall|j: int| 0 <= j < N && !(off <= j < off + KEY_LEN) ==> final(out)@[j] == old(out)@[j],
+{
+    let mut i: usize = 0;
+    while i < KEY_LEN
+        invariant
+            i <= KEY_LEN, off + KEY_LEN <= N, is_key(src@),
+            forall|j: int| 0 <= j < i ==> out@[off + j] == src@[j],
+            forall|j: int| 0 <= j < N && !(off <= j < off + KEY_LEN) ==> out@[j] == old(out)@[j],
+        decreases KEY_LEN - i,
+    {
+        out[off + i] = *slice_index_get(src, i);
+        i += 1;
+    }
+    proof { assert(out@.subrange(off as int, off as int + KEY_LEN as int) =~= src@); }
 }
 
-impl Offer {
+/// Write `x` little-endian into `out[off..off+8]`.
+fn put_u64<const N: usize>(out: &mut [u8; N], off: usize, x: u64)
+    requires off + 8 <= N,
+    ensures
+        final(out)@.subrange(off as int, off as int + 8) == spec_u64_to_le_bytes(x),
+        forall|j: int| 0 <= j < N && !(off <= j < off + 8) ==> final(out)@[j] == old(out)@[j],
+{
+    proof { spec_u64_to_le_bytes_to_open(x); }
+    out[off] = (x & 0xff) as u8;
+    out[off + 1] = ((x >> 8) & 0xff) as u8;
+    out[off + 2] = ((x >> 16) & 0xff) as u8;
+    out[off + 3] = ((x >> 24) & 0xff) as u8;
+    out[off + 4] = ((x >> 32) & 0xff) as u8;
+    out[off + 5] = ((x >> 40) & 0xff) as u8;
+    out[off + 6] = ((x >> 48) & 0xff) as u8;
+    out[off + 7] = ((x >> 56) & 0xff) as u8;
+    proof { assert(out@.subrange(off as int, off as int + 8) =~= spec_u64_to_le_bytes_open(x)); }
+}
+
+// ───────────────────────────── the offer account ─────────────────────────────
+
+pub struct Offer<'a> {
+    pub bump: u8,
+    pub seed: u64,
+    pub maker: &'a [u8],
+    pub claim_key: &'a [u8],
+    pub mint_a: &'a [u8],
+    pub mint_b: &'a [u8],
+    pub amount_a: u64,
+    pub amount_b: u64,
+    /// Unix time before which the maker may not cancel (0 = cancellable at once).
+    pub not_before: u64,
+}
+
+impl<'a> Offer<'a> {
     pub open spec fn wf(&self) -> bool {
         is_key(self.maker@) && is_key(self.claim_key@) && is_key(self.mint_a@) && is_key(self.mint_b@)
     }
@@ -128,36 +147,36 @@ impl Offer {
     pub open spec fn bytes(&self) -> Seq<u8> {
         seq![OFFER_VERSION, self.bump] + spec_u64_to_le_bytes(self.seed) + self.maker@ + self.claim_key@
             + self.mint_a@ + self.mint_b@ + spec_u64_to_le_bytes(self.amount_a) + spec_u64_to_le_bytes(self.amount_b)
+            + spec_u64_to_le_bytes(self.not_before)
     }
     pub open spec fn same_as(&self, o: &Offer) -> bool {
         self.bump == o.bump && self.seed == o.seed && self.maker@ == o.maker@ && self.claim_key@ == o.claim_key@
             && self.mint_a@ == o.mint_a@ && self.mint_b@ == o.mint_b@ && self.amount_a == o.amount_a && self.amount_b == o.amount_b
+            && self.not_before == o.not_before
     }
 }
 
-pub fn encode_offer(o: &Offer) -> (out: Vec<u8>)
+pub fn encode_offer(o: &Offer) -> (out: [u8; OFFER_LEN])
     requires o.wf(),
-    ensures out@ == o.bytes(), out@.len() == OFFER_LEN,
+    ensures out@ == o.bytes(),
 {
     proof { lemma_auto_spec_u64_to_from_le_bytes(); }
-    let mut v: Vec<u8> = Vec::new();
-    v.push(OFFER_VERSION);
-    v.push(o.bump);
-    let seed = u64_to_le_bytes(o.seed);
-    push_all(&mut v, seed.as_slice());
-    push_all(&mut v, o.maker.as_slice());
-    push_all(&mut v, o.claim_key.as_slice());
-    push_all(&mut v, o.mint_a.as_slice());
-    push_all(&mut v, o.mint_b.as_slice());
-    let a = u64_to_le_bytes(o.amount_a);
-    push_all(&mut v, a.as_slice());
-    let b = u64_to_le_bytes(o.amount_b);
-    push_all(&mut v, b.as_slice());
-    proof { assert(v@ =~= o.bytes()); }
-    v
+    let mut out: [u8; OFFER_LEN] = array_fill_for_copy_types(0u8);
+    out[0] = OFFER_VERSION;
+    out[1] = o.bump;
+    put_u64(&mut out, 2, o.seed);
+    put_key(&mut out, 10, o.maker);
+    put_key(&mut out, 42, o.claim_key);
+    put_key(&mut out, 74, o.mint_a);
+    put_key(&mut out, 106, o.mint_b);
+    put_u64(&mut out, 138, o.amount_a);
+    put_u64(&mut out, 146, o.amount_b);
+    put_u64(&mut out, 154, o.not_before);
+    proof { assert(out@ =~= o.bytes()); }
+    out
 }
 
-pub fn decode_offer(d: &[u8]) -> (r: Option<Offer>)
+pub fn decode_offer<'a>(d: &'a [u8]) -> (r: Option<Offer<'a>>)
     ensures
         match r { Some(o) => o.wf() && d@ == o.bytes(), None => true },
         (d@.len() == OFFER_LEN && d@[0] == OFFER_VERSION) ==> r.is_some(),
@@ -172,30 +191,33 @@ pub fn decode_offer(d: &[u8]) -> (r: Option<Offer>)
     let mint_b = key_at(d, 106);
     let amount_a = u64_from_le_bytes(slice_subrange(d, 138, 146));
     let amount_b = u64_from_le_bytes(slice_subrange(d, 146, 154));
-    let o = Offer { bump, seed, maker, claim_key, mint_a, mint_b, amount_a, amount_b };
+    let not_before = u64_from_le_bytes(slice_subrange(d, 154, 162));
+    let o = Offer { bump, seed, maker, claim_key, mint_a, mint_b, amount_a, amount_b, not_before };
     proof { assert(o.bytes() =~= d@); }
     Some(o)
 }
 
 // ───────────────────────────── instructions ─────────────────────────────
 
-pub struct MakeArgs {
+pub struct MakeArgs<'a> {
     pub seed: u64,
     pub amount_a: u64,
     pub amount_b: u64,
-    pub claim_key: Vec<u8>,
-    pub mint_b: Vec<u8>,
+    pub claim_key: &'a [u8],
+    pub mint_b: &'a [u8],
+    pub not_before: u64,
 }
 
-impl MakeArgs {
+impl<'a> MakeArgs<'a> {
     pub open spec fn wf(&self) -> bool { is_key(self.claim_key@) && is_key(self.mint_b@) }
     pub open spec fn bytes(&self) -> Seq<u8> {
-        spec_u64_to_le_bytes(self.seed) + spec_u64_to_le_bytes(self.amount_a) + spec_u64_to_le_bytes(self.amount_b) + self.claim_key@ + self.mint_b@
+        spec_u64_to_le_bytes(self.seed) + spec_u64_to_le_bytes(self.amount_a) + spec_u64_to_le_bytes(self.amount_b)
+            + self.claim_key@ + self.mint_b@ + spec_u64_to_le_bytes(self.not_before)
     }
 }
 
-pub enum Instruction {
-    Make(MakeArgs),
+pub enum Instruction<'a> {
+    Make(MakeArgs<'a>),
     Take,
     Cancel,
 }
@@ -208,27 +230,25 @@ pub open spec fn instruction_bytes(ix: &Instruction) -> Seq<u8> {
     }
 }
 
-pub fn encode_make_args(a: &MakeArgs) -> (out: Vec<u8>)
+pub fn encode_make_args(a: &MakeArgs) -> (out: [u8; MAKE_IX_LEN])
     requires a.wf(),
-    ensures out@ == seq![TAG_MAKE] + a.bytes(), out@.len() == 1 + MAKE_ARGS_LEN,
+    ensures out@ == seq![TAG_MAKE] + a.bytes(),
 {
     proof { lemma_auto_spec_u64_to_from_le_bytes(); }
-    let mut v: Vec<u8> = Vec::new();
-    v.push(TAG_MAKE);
-    let s = u64_to_le_bytes(a.seed);
-    push_all(&mut v, s.as_slice());
-    let x = u64_to_le_bytes(a.amount_a);
-    push_all(&mut v, x.as_slice());
-    let y = u64_to_le_bytes(a.amount_b);
-    push_all(&mut v, y.as_slice());
-    push_all(&mut v, a.claim_key.as_slice());
-    push_all(&mut v, a.mint_b.as_slice());
-    proof { assert(v@ =~= seq![TAG_MAKE] + a.bytes()); }
-    v
+    let mut out: [u8; MAKE_IX_LEN] = array_fill_for_copy_types(0u8);
+    out[0] = TAG_MAKE;
+    put_u64(&mut out, 1, a.seed);
+    put_u64(&mut out, 9, a.amount_a);
+    put_u64(&mut out, 17, a.amount_b);
+    put_key(&mut out, 25, a.claim_key);
+    put_key(&mut out, 57, a.mint_b);
+    put_u64(&mut out, 89, a.not_before);
+    proof { assert(out@ =~= seq![TAG_MAKE] + a.bytes()); }
+    out
 }
 
 /// Parse instruction data. A parse succeeds only when the bytes are exactly an encoding.
-pub fn parse_instruction(d: &[u8]) -> (r: Option<Instruction>)
+pub fn parse_instruction<'a>(d: &'a [u8]) -> (r: Option<Instruction<'a>>)
     ensures
         match r {
             Some(ix) => d@ == instruction_bytes(&ix) && (ix matches Instruction::Make(a) ==> a.wf()),
@@ -247,14 +267,15 @@ pub fn parse_instruction(d: &[u8]) -> (r: Option<Instruction>)
         proof { assert(d@ =~= seq![TAG_CANCEL]); }
         return Some(Instruction::Cancel);
     }
-    if tag != TAG_MAKE || d.len() != 1 + MAKE_ARGS_LEN { return None; }
+    if tag != TAG_MAKE || d.len() != MAKE_IX_LEN { return None; }
     proof { lemma_auto_spec_u64_to_from_le_bytes(); }
     let seed = u64_from_le_bytes(slice_subrange(d, 1, 9));
     let amount_a = u64_from_le_bytes(slice_subrange(d, 9, 17));
     let amount_b = u64_from_le_bytes(slice_subrange(d, 17, 25));
     let claim_key = key_at(d, 25);
     let mint_b = key_at(d, 57);
-    let a = MakeArgs { seed, amount_a, amount_b, claim_key, mint_b };
+    let not_before = u64_from_le_bytes(slice_subrange(d, 89, 97));
+    let a = MakeArgs { seed, amount_a, amount_b, claim_key, mint_b, not_before };
     proof { assert(seq![TAG_MAKE] + a.bytes() =~= d@); }
     Some(Instruction::Make(a))
 }
@@ -262,7 +283,7 @@ pub fn parse_instruction(d: &[u8]) -> (r: Option<Instruction>)
 // ───────────────────────────── SPL token account views ─────────────────────────────
 
 /// (mint, owner) of an SPL token account: bytes [0..32] and [32..64].
-pub fn parse_token_account(d: &[u8]) -> (r: Option<(Vec<u8>, Vec<u8>)>)
+pub fn parse_token_account<'a>(d: &'a [u8]) -> (r: Option<(&'a [u8], &'a [u8])>)
     ensures
         match r { Some(mo) => mo.0@ == d@.subrange(0, 32) && mo.1@ == d@.subrange(32, 64), None => d@.len() < TOKEN_ACCOUNT_MIN_LEN },
 {
@@ -280,38 +301,35 @@ pub fn parse_mint_decimals(d: &[u8]) -> (r: Option<u8>)
 
 // ───────────────────────────── facts and plans ─────────────────────────────
 
-pub struct Signer { pub key: Vec<u8>, pub is_signer: bool }
-pub struct MintFacts { pub key: Vec<u8>, pub program: Vec<u8>, pub decimals: u8 }
+pub struct Signer<'a> { pub key: &'a [u8], pub is_signer: bool }
+pub struct MintFacts<'a> { pub key: &'a [u8], pub program: &'a [u8], pub decimals: u8 }
 /// A token account as presented, plus the address the adapter derived for it.
-pub struct TokenFacts { pub key: Vec<u8>, pub expected_key: Vec<u8>, pub program: Vec<u8>, pub mint: Vec<u8>, pub authority: Vec<u8> }
+pub struct TokenFacts<'a> { pub key: &'a [u8], pub expected_key: &'a [u8], pub program: &'a [u8], pub mint: &'a [u8], pub authority: &'a [u8] }
 /// The offer account as presented. `pda_ok`: the adapter recomputed the PDA from the decoded seed/maker/bump and it matched `key`.
-pub struct OfferFacts { pub key: Vec<u8>, pub data: Vec<u8>, pub owned_by_program: bool, pub pda_ok: bool }
+pub struct OfferFacts<'a> { pub key: &'a [u8], pub data: &'a [u8], pub owned_by_program: bool, pub pda_ok: bool }
 
 pub open spec fn token_ok(t: &TokenFacts, owner: Seq<u8>, mint: Seq<u8>, program: Seq<u8>) -> bool {
     t.key@ == t.expected_key@ && t.program@ == program && t.mint@ == mint && t.authority@ == owner
 }
 
-fn check_token(t: &TokenFacts, owner: &Vec<u8>, mint: &Vec<u8>, program: &Vec<u8>) -> (r: bool)
+fn check_token(t: &TokenFacts, owner: &[u8], mint: &[u8], program: &[u8]) -> (r: bool)
     ensures r == token_ok(t, owner@, mint@, program@),
 {
-    bytes_eq(t.key.as_slice(), t.expected_key.as_slice())
-        && bytes_eq(t.program.as_slice(), program.as_slice())
-        && bytes_eq(t.mint.as_slice(), mint.as_slice())
-        && bytes_eq(t.authority.as_slice(), owner.as_slice())
+    bytes_eq(t.key, t.expected_key) && bytes_eq(t.program, program) && bytes_eq(t.mint, mint) && bytes_eq(t.authority, owner)
 }
 
-pub struct Transfer {
-    pub program: Vec<u8>,
-    pub from: Vec<u8>,
-    pub mint: Vec<u8>,
-    pub to: Vec<u8>,
-    pub authority: Vec<u8>,
+pub struct Transfer<'a> {
+    pub program: &'a [u8],
+    pub from: &'a [u8],
+    pub mint: &'a [u8],
+    pub to: &'a [u8],
+    pub authority: &'a [u8],
     /// true: the authority is the offer PDA and the adapter must sign with its seeds; false: a transaction signer.
     pub authority_is_offer: bool,
     pub amount: u64,
     pub decimals: u8,
 }
-pub struct Close { pub program: Vec<u8>, pub account: Vec<u8>, pub dest: Vec<u8> }
+pub struct Close<'a> { pub program: &'a [u8], pub account: &'a [u8], pub dest: &'a [u8] }
 
 pub open spec fn transfer_is(t: &Transfer, program: Seq<u8>, from: Seq<u8>, mint: Seq<u8>, to: Seq<u8>, authority: Seq<u8>, by_offer: bool, amount: u64, decimals: u8) -> bool {
     t.program@ == program && t.from@ == from && t.mint@ == mint && t.to@ == to && t.authority@ == authority
@@ -323,23 +341,23 @@ pub open spec fn close_is(c: &Close, program: Seq<u8>, account: Seq<u8>, dest: S
 
 // ── make ──
 
-pub struct MakeFacts {
-    pub maker: Signer,
-    pub offer_key: Vec<u8>,
+pub struct MakeFacts<'a> {
+    pub maker: Signer<'a>,
+    pub offer_key: &'a [u8],
     /// lamports == 0 and no data: the account does not exist yet.
     pub offer_is_empty: bool,
     /// find_program_address(["offer", maker, seed]) as computed by the adapter.
-    pub pda: Vec<u8>,
+    pub pda: &'a [u8],
     pub bump: u8,
-    pub mint_a: MintFacts,
-    pub maker_ata_a: TokenFacts,
-    pub vault: TokenFacts,
-    pub token_program_a: Vec<u8>,
-    pub system_program: Vec<u8>,
+    pub mint_a: MintFacts<'a>,
+    pub maker_ata_a: TokenFacts<'a>,
+    pub vault: TokenFacts<'a>,
+    pub token_program_a: &'a [u8],
+    pub system_program: &'a [u8],
 }
-pub struct MakePlan { pub offer: Offer, pub offer_bytes: Vec<u8>, pub fund: Transfer }
+pub struct MakePlan<'a> { pub offer: Offer<'a>, pub offer_bytes: [u8; OFFER_LEN], pub fund: Transfer<'a> }
 
-pub fn decide_make(f: &MakeFacts, a: &MakeArgs) -> (r: Option<MakePlan>)
+pub fn decide_make<'a>(f: &MakeFacts<'a>, a: &MakeArgs<'a>) -> (r: Option<MakePlan<'a>>)
     requires a.wf(), is_key(f.maker.key@), is_key(f.mint_a.key@),
     ensures
         match r {
@@ -357,51 +375,51 @@ pub fn decide_make(f: &MakeFacts, a: &MakeArgs) -> (r: Option<MakePlan>)
                 &&& p.offer.wf()
                 &&& p.offer.bump == f.bump && p.offer.seed == a.seed && p.offer.maker@ == f.maker.key@
                 &&& p.offer.claim_key@ == a.claim_key@ && p.offer.mint_a@ == f.mint_a.key@ && p.offer.mint_b@ == a.mint_b@
-                &&& p.offer.amount_a == a.amount_a && p.offer.amount_b == a.amount_b
+                &&& p.offer.amount_a == a.amount_a && p.offer.amount_b == a.amount_b && p.offer.not_before == a.not_before
                 &&& p.offer_bytes@ == p.offer.bytes()
                 &&& transfer_is(&p.fund, f.mint_a.program@, f.maker_ata_a.key@, f.mint_a.key@, f.vault.key@, f.maker.key@, false, a.amount_a, f.mint_a.decimals)
             },
         },
 {
     if !f.maker.is_signer || !f.offer_is_empty { return None; }
-    if !bytes_eq(f.pda.as_slice(), f.offer_key.as_slice()) { return None; }
-    if !key_is(&f.system_program, &SYSTEM_PROGRAM) { return None; }
-    if !token_program_ok(&f.mint_a.program) { return None; }
-    if !bytes_eq(f.token_program_a.as_slice(), f.mint_a.program.as_slice()) { return None; }
-    if !check_token(&f.maker_ata_a, &f.maker.key, &f.mint_a.key, &f.mint_a.program) { return None; }
-    if !check_token(&f.vault, &f.offer_key, &f.mint_a.key, &f.mint_a.program) { return None; }
+    if !bytes_eq(f.pda, f.offer_key) { return None; }
+    if !key_is(f.system_program, &SYSTEM_PROGRAM) { return None; }
+    if !token_program_ok(f.mint_a.program) { return None; }
+    if !bytes_eq(f.token_program_a, f.mint_a.program) { return None; }
+    if !check_token(&f.maker_ata_a, f.maker.key, f.mint_a.key, f.mint_a.program) { return None; }
+    if !check_token(&f.vault, f.offer_key, f.mint_a.key, f.mint_a.program) { return None; }
     if a.amount_a == 0 || a.amount_b == 0 { return None; }
     let offer = Offer {
-        bump: f.bump, seed: a.seed, maker: copy_key(&f.maker.key), claim_key: copy_key(&a.claim_key),
-        mint_a: copy_key(&f.mint_a.key), mint_b: copy_key(&a.mint_b), amount_a: a.amount_a, amount_b: a.amount_b,
+        bump: f.bump, seed: a.seed, maker: f.maker.key, claim_key: a.claim_key, mint_a: f.mint_a.key, mint_b: a.mint_b,
+        amount_a: a.amount_a, amount_b: a.amount_b, not_before: a.not_before,
     };
     let offer_bytes = encode_offer(&offer);
     let fund = Transfer {
-        program: copy_key(&f.mint_a.program), from: copy_key(&f.maker_ata_a.key), mint: copy_key(&f.mint_a.key), to: copy_key(&f.vault.key),
-        authority: copy_key(&f.maker.key), authority_is_offer: false, amount: a.amount_a, decimals: f.mint_a.decimals,
+        program: f.mint_a.program, from: f.maker_ata_a.key, mint: f.mint_a.key, to: f.vault.key,
+        authority: f.maker.key, authority_is_offer: false, amount: a.amount_a, decimals: f.mint_a.decimals,
     };
     Some(MakePlan { offer, offer_bytes, fund })
 }
 
 // ── take ──
 
-pub struct TakeFacts {
-    pub offer: OfferFacts,
-    pub claim: Signer,
-    pub payer: Signer,
-    pub maker_key: Vec<u8>,
-    pub mint_a: MintFacts,
-    pub mint_b: MintFacts,
-    pub vault: TokenFacts,
-    pub payer_ata_a: TokenFacts,
-    pub payer_ata_b: TokenFacts,
-    pub maker_ata_b: TokenFacts,
-    pub token_program_a: Vec<u8>,
-    pub token_program_b: Vec<u8>,
+pub struct TakeFacts<'a> {
+    pub offer: OfferFacts<'a>,
+    pub claim: Signer<'a>,
+    pub payer: Signer<'a>,
+    pub maker_key: &'a [u8],
+    pub mint_a: MintFacts<'a>,
+    pub mint_b: MintFacts<'a>,
+    pub vault: TokenFacts<'a>,
+    pub payer_ata_a: TokenFacts<'a>,
+    pub payer_ata_b: TokenFacts<'a>,
+    pub maker_ata_b: TokenFacts<'a>,
+    pub token_program_a: &'a [u8],
+    pub token_program_b: &'a [u8],
 }
-pub struct TakePlan { pub offer: Offer, pub pay: Transfer, pub release: Transfer, pub close_vault: Close, pub offer_rent_to: Vec<u8> }
+pub struct TakePlan<'a> { pub offer: Offer<'a>, pub pay: Transfer<'a>, pub release: Transfer<'a>, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
 
-pub fn decide_take(f: &TakeFacts) -> (r: Option<TakePlan>)
+pub fn decide_take<'a>(f: &TakeFacts<'a>) -> (r: Option<TakePlan<'a>>)
     ensures
         match r {
             None => true,
@@ -427,43 +445,44 @@ pub fn decide_take(f: &TakeFacts) -> (r: Option<TakePlan>)
 {
     if !f.claim.is_signer || !f.payer.is_signer { return None; }
     if !f.offer.owned_by_program || !f.offer.pda_ok { return None; }
-    let offer = match decode_offer(f.offer.data.as_slice()) { Some(o) => o, None => { return None; } };
-    if !bytes_eq(offer.claim_key.as_slice(), f.claim.key.as_slice()) { return None; }
-    if !bytes_eq(offer.maker.as_slice(), f.maker_key.as_slice()) { return None; }
-    if !bytes_eq(offer.mint_a.as_slice(), f.mint_a.key.as_slice()) { return None; }
-    if !bytes_eq(offer.mint_b.as_slice(), f.mint_b.key.as_slice()) { return None; }
-    if !token_program_ok(&f.mint_a.program) || !bytes_eq(f.token_program_a.as_slice(), f.mint_a.program.as_slice()) { return None; }
-    if !token_program_ok(&f.mint_b.program) || !bytes_eq(f.token_program_b.as_slice(), f.mint_b.program.as_slice()) { return None; }
-    if !check_token(&f.vault, &f.offer.key, &f.mint_a.key, &f.mint_a.program) { return None; }
-    if !check_token(&f.payer_ata_a, &f.payer.key, &f.mint_a.key, &f.mint_a.program) { return None; }
-    if !check_token(&f.payer_ata_b, &f.payer.key, &f.mint_b.key, &f.mint_b.program) { return None; }
-    if !check_token(&f.maker_ata_b, &f.maker_key, &f.mint_b.key, &f.mint_b.program) { return None; }
+    let offer = match decode_offer(f.offer.data) { Some(o) => o, None => { return None; } };
+    if !bytes_eq(offer.claim_key, f.claim.key) { return None; }
+    if !bytes_eq(offer.maker, f.maker_key) { return None; }
+    if !bytes_eq(offer.mint_a, f.mint_a.key) { return None; }
+    if !bytes_eq(offer.mint_b, f.mint_b.key) { return None; }
+    if !token_program_ok(f.mint_a.program) || !bytes_eq(f.token_program_a, f.mint_a.program) { return None; }
+    if !token_program_ok(f.mint_b.program) || !bytes_eq(f.token_program_b, f.mint_b.program) { return None; }
+    if !check_token(&f.vault, f.offer.key, f.mint_a.key, f.mint_a.program) { return None; }
+    if !check_token(&f.payer_ata_a, f.payer.key, f.mint_a.key, f.mint_a.program) { return None; }
+    if !check_token(&f.payer_ata_b, f.payer.key, f.mint_b.key, f.mint_b.program) { return None; }
+    if !check_token(&f.maker_ata_b, f.maker_key, f.mint_b.key, f.mint_b.program) { return None; }
     let pay = Transfer {
-        program: copy_key(&f.mint_b.program), from: copy_key(&f.payer_ata_b.key), mint: copy_key(&f.mint_b.key), to: copy_key(&f.maker_ata_b.key),
-        authority: copy_key(&f.payer.key), authority_is_offer: false, amount: offer.amount_b, decimals: f.mint_b.decimals,
+        program: f.mint_b.program, from: f.payer_ata_b.key, mint: f.mint_b.key, to: f.maker_ata_b.key,
+        authority: f.payer.key, authority_is_offer: false, amount: offer.amount_b, decimals: f.mint_b.decimals,
     };
     let release = Transfer {
-        program: copy_key(&f.mint_a.program), from: copy_key(&f.vault.key), mint: copy_key(&f.mint_a.key), to: copy_key(&f.payer_ata_a.key),
-        authority: copy_key(&f.offer.key), authority_is_offer: true, amount: offer.amount_a, decimals: f.mint_a.decimals,
+        program: f.mint_a.program, from: f.vault.key, mint: f.mint_a.key, to: f.payer_ata_a.key,
+        authority: f.offer.key, authority_is_offer: true, amount: offer.amount_a, decimals: f.mint_a.decimals,
     };
-    let close_vault = Close { program: copy_key(&f.mint_a.program), account: copy_key(&f.vault.key), dest: copy_key(&f.payer.key) };
-    let offer_rent_to = copy_key(&f.maker_key);
-    Some(TakePlan { offer, pay, release, close_vault, offer_rent_to })
+    let close_vault = Close { program: f.mint_a.program, account: f.vault.key, dest: f.payer.key };
+    Some(TakePlan { offer, pay, release, close_vault, offer_rent_to: f.maker_key })
 }
 
 // ── cancel ──
 
-pub struct CancelFacts {
-    pub maker: Signer,
-    pub offer: OfferFacts,
-    pub mint_a: MintFacts,
-    pub vault: TokenFacts,
-    pub maker_ata_a: TokenFacts,
-    pub token_program_a: Vec<u8>,
+pub struct CancelFacts<'a> {
+    pub maker: Signer<'a>,
+    pub offer: OfferFacts<'a>,
+    pub mint_a: MintFacts<'a>,
+    pub vault: TokenFacts<'a>,
+    pub maker_ata_a: TokenFacts<'a>,
+    pub token_program_a: &'a [u8],
+    /// Unix time now, from the clock sysvar.
+    pub now: u64,
 }
-pub struct CancelPlan { pub offer: Offer, pub refund: Transfer, pub close_vault: Close, pub offer_rent_to: Vec<u8> }
+pub struct CancelPlan<'a> { pub offer: Offer<'a>, pub refund: Transfer<'a>, pub close_vault: Close<'a>, pub offer_rent_to: &'a [u8] }
 
-pub fn decide_cancel(f: &CancelFacts) -> (r: Option<CancelPlan>)
+pub fn decide_cancel<'a>(f: &CancelFacts<'a>) -> (r: Option<CancelPlan<'a>>)
     ensures
         match r {
             None => true,
@@ -473,6 +492,7 @@ pub fn decide_cancel(f: &CancelFacts) -> (r: Option<CancelPlan>)
                 &&& p.offer.wf() && f.offer.data@ == p.offer.bytes()
                 &&& p.offer.maker@ == f.maker.key@
                 &&& p.offer.mint_a@ == f.mint_a.key@
+                &&& f.now >= p.offer.not_before
                 &&& is_token_program(f.mint_a.program@) && f.token_program_a@ == f.mint_a.program@
                 &&& token_ok(&f.vault, f.offer.key@, f.mint_a.key@, f.mint_a.program@)
                 &&& token_ok(&f.maker_ata_a, f.maker.key@, f.mint_a.key@, f.mint_a.program@)
@@ -484,24 +504,24 @@ pub fn decide_cancel(f: &CancelFacts) -> (r: Option<CancelPlan>)
 {
     if !f.maker.is_signer { return None; }
     if !f.offer.owned_by_program || !f.offer.pda_ok { return None; }
-    let offer = match decode_offer(f.offer.data.as_slice()) { Some(o) => o, None => { return None; } };
-    if !bytes_eq(offer.maker.as_slice(), f.maker.key.as_slice()) { return None; }
-    if !bytes_eq(offer.mint_a.as_slice(), f.mint_a.key.as_slice()) { return None; }
-    if !token_program_ok(&f.mint_a.program) || !bytes_eq(f.token_program_a.as_slice(), f.mint_a.program.as_slice()) { return None; }
-    if !check_token(&f.vault, &f.offer.key, &f.mint_a.key, &f.mint_a.program) { return None; }
-    if !check_token(&f.maker_ata_a, &f.maker.key, &f.mint_a.key, &f.mint_a.program) { return None; }
+    let offer = match decode_offer(f.offer.data) { Some(o) => o, None => { return None; } };
+    if !bytes_eq(offer.maker, f.maker.key) { return None; }
+    if !bytes_eq(offer.mint_a, f.mint_a.key) { return None; }
+    if f.now < offer.not_before { return None; }
+    if !token_program_ok(f.mint_a.program) || !bytes_eq(f.token_program_a, f.mint_a.program) { return None; }
+    if !check_token(&f.vault, f.offer.key, f.mint_a.key, f.mint_a.program) { return None; }
+    if !check_token(&f.maker_ata_a, f.maker.key, f.mint_a.key, f.mint_a.program) { return None; }
     let refund = Transfer {
-        program: copy_key(&f.mint_a.program), from: copy_key(&f.vault.key), mint: copy_key(&f.mint_a.key), to: copy_key(&f.maker_ata_a.key),
-        authority: copy_key(&f.offer.key), authority_is_offer: true, amount: offer.amount_a, decimals: f.mint_a.decimals,
+        program: f.mint_a.program, from: f.vault.key, mint: f.mint_a.key, to: f.maker_ata_a.key,
+        authority: f.offer.key, authority_is_offer: true, amount: offer.amount_a, decimals: f.mint_a.decimals,
     };
-    let close_vault = Close { program: copy_key(&f.mint_a.program), account: copy_key(&f.vault.key), dest: copy_key(&f.maker.key) };
-    let offer_rent_to = copy_key(&f.maker.key);
-    Some(CancelPlan { offer, refund, close_vault, offer_rent_to })
+    let close_vault = Close { program: f.mint_a.program, account: f.vault.key, dest: f.maker.key };
+    Some(CancelPlan { offer, refund, close_vault, offer_rent_to: f.maker.key })
 }
 
 // ───────────────────────────── theorems ─────────────────────────────
 
-/// Decoding an encoding gives the same offer back.
+/// Two offers with the same bytes are the same offer.
 pub proof fn lemma_offer_roundtrip(o: Offer, d: Offer)
     requires o.wf(), d.wf(), d.bytes() == o.bytes(),
     ensures d.same_as(&o),
@@ -509,13 +529,14 @@ pub proof fn lemma_offer_roundtrip(o: Offer, d: Offer)
     lemma_auto_spec_u64_to_from_le_bytes();
     let ob = o.bytes();
     let db = d.bytes();
-    // component lengths, so the subranges land on field boundaries
     assert(spec_u64_to_le_bytes(o.seed).len() == 8);
     assert(spec_u64_to_le_bytes(d.seed).len() == 8);
     assert(spec_u64_to_le_bytes(o.amount_a).len() == 8);
     assert(spec_u64_to_le_bytes(d.amount_a).len() == 8);
     assert(spec_u64_to_le_bytes(o.amount_b).len() == 8);
     assert(spec_u64_to_le_bytes(d.amount_b).len() == 8);
+    assert(spec_u64_to_le_bytes(o.not_before).len() == 8);
+    assert(spec_u64_to_le_bytes(d.not_before).len() == 8);
     assert(o.bump == ob[1]);
     assert(d.bump == db[1]);
     assert(ob.subrange(2, 10) =~= spec_u64_to_le_bytes(o.seed));
@@ -538,6 +559,10 @@ pub proof fn lemma_offer_roundtrip(o: Offer, d: Offer)
     assert(db.subrange(146, 154) =~= spec_u64_to_le_bytes(d.amount_b));
     assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(o.amount_b)) == o.amount_b);
     assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(d.amount_b)) == d.amount_b);
+    assert(ob.subrange(154, 162) =~= spec_u64_to_le_bytes(o.not_before));
+    assert(db.subrange(154, 162) =~= spec_u64_to_le_bytes(d.not_before));
+    assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(o.not_before)) == o.not_before);
+    assert(spec_u64_from_le_bytes(spec_u64_to_le_bytes(d.not_before)) == d.not_before);
 }
 
 } // verus!
@@ -553,7 +578,7 @@ pub mod abi {
 
     pub mod make {
         pub const MAKER: usize = 0; pub const OFFER: usize = 1; pub const MINT_A: usize = 2; pub const MAKER_ATA_A: usize = 3;
-        pub const VAULT: usize = 4; pub const TOKEN_PROGRAM_A: usize = 5; pub const SYSTEM_PROGRAM: usize = 6;
+        pub const VAULT: usize = 4; pub const TOKEN_PROGRAM_A: usize = 5; pub const SYSTEM_PROGRAM: usize = 6; pub const COUNT: usize = 7;
     }
     pub const MAKE_ACCOUNTS: &[AccountSpec] = &[
         AccountSpec { name: "maker", signer: true, writable: true }, AccountSpec { name: "offer", signer: false, writable: true },
@@ -564,7 +589,7 @@ pub mod abi {
     pub mod take {
         pub const CLAIM_KEY: usize = 0; pub const PAYER: usize = 1; pub const MAKER: usize = 2; pub const OFFER: usize = 3; pub const MINT_A: usize = 4;
         pub const MINT_B: usize = 5; pub const VAULT: usize = 6; pub const PAYER_ATA_A: usize = 7; pub const PAYER_ATA_B: usize = 8;
-        pub const MAKER_ATA_B: usize = 9; pub const TOKEN_PROGRAM_A: usize = 10; pub const TOKEN_PROGRAM_B: usize = 11;
+        pub const MAKER_ATA_B: usize = 9; pub const TOKEN_PROGRAM_A: usize = 10; pub const TOKEN_PROGRAM_B: usize = 11; pub const COUNT: usize = 12;
     }
     pub const TAKE_ACCOUNTS: &[AccountSpec] = &[
         AccountSpec { name: "claim_key", signer: true, writable: false }, AccountSpec { name: "payer", signer: true, writable: true },
@@ -576,7 +601,7 @@ pub mod abi {
     ];
     pub mod cancel {
         pub const MAKER: usize = 0; pub const OFFER: usize = 1; pub const MINT_A: usize = 2; pub const VAULT: usize = 3;
-        pub const MAKER_ATA_A: usize = 4; pub const TOKEN_PROGRAM_A: usize = 5;
+        pub const MAKER_ATA_A: usize = 4; pub const TOKEN_PROGRAM_A: usize = 5; pub const COUNT: usize = 6;
     }
     pub const CANCEL_ACCOUNTS: &[AccountSpec] = &[
         AccountSpec { name: "maker", signer: true, writable: true }, AccountSpec { name: "offer", signer: false, writable: true },
@@ -588,13 +613,13 @@ pub mod abi {
         FieldSpec { name: "seed", offset: 2, len: 8, kind: "u64le" }, FieldSpec { name: "maker", offset: 10, len: 32, kind: "pubkey" },
         FieldSpec { name: "claim_key", offset: 42, len: 32, kind: "pubkey" }, FieldSpec { name: "mint_a", offset: 74, len: 32, kind: "pubkey" },
         FieldSpec { name: "mint_b", offset: 106, len: 32, kind: "pubkey" }, FieldSpec { name: "amount_a", offset: 138, len: 8, kind: "u64le" },
-        FieldSpec { name: "amount_b", offset: 146, len: 8, kind: "u64le" },
+        FieldSpec { name: "amount_b", offset: 146, len: 8, kind: "u64le" }, FieldSpec { name: "not_before", offset: 154, len: 8, kind: "u64le" },
     ];
     /// Instruction data after the one-byte tag.
     pub const MAKE_ARGS_FIELDS: &[FieldSpec] = &[
         FieldSpec { name: "seed", offset: 0, len: 8, kind: "u64le" }, FieldSpec { name: "amount_a", offset: 8, len: 8, kind: "u64le" },
         FieldSpec { name: "amount_b", offset: 16, len: 8, kind: "u64le" }, FieldSpec { name: "claim_key", offset: 24, len: 32, kind: "pubkey" },
-        FieldSpec { name: "mint_b", offset: 56, len: 32, kind: "pubkey" },
+        FieldSpec { name: "mint_b", offset: 56, len: 32, kind: "pubkey" }, FieldSpec { name: "not_before", offset: 88, len: 8, kind: "u64le" },
     ];
     pub const OFFER_PDA_SEED: &str = "offer";
     pub const CLAIM_KDF: &str = "PBKDF2-SHA512";

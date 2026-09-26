@@ -17,6 +17,6 @@ custom-panic = []
 
 [dependencies]
 dregg-otc-core = { path = "../core" }
-solana-program = { version = "=3.0.0", default-features = false }
+pinocchio = { version = "0.11.2", features = ["cpi"] }
 
 

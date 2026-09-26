@@ -16,7 +16,7 @@ const check = (name, got, want) => { const ok = got === want; console.log(`${ok 
 
 // offer encoding: JS bytes == core bytes
 const o = vec.offer;
-check("offer encode", hex(otc.encodeOffer({ bump: o.bump, seed: o.seed, maker: P(o.maker), claim_key: P(o.claim_key), mint_a: P(o.mint_a), mint_b: P(o.mint_b), amount_a: o.amount_a, amount_b: o.amount_b })), o.bytes_hex);
+check("offer encode", hex(otc.encodeOffer({ bump: o.bump, seed: o.seed, maker: P(o.maker), claim_key: P(o.claim_key), mint_a: P(o.mint_a), mint_b: P(o.mint_b), amount_a: o.amount_a, amount_b: o.amount_b, not_before: o.not_before })), o.bytes_hex);
 // offer decoding: JS fields == core fields
 const bytes = Uint8Array.from(Buffer.from(o.bytes_hex, "hex"));
 const d = otc.readOffer(bytes);
@@ -24,10 +24,10 @@ check("offer decode bump", String(d.bump), String(o.bump));
 check("offer decode seed", d.seed.toString(), o.seed);
 check("offer decode maker", d.maker.toBase58(), o.maker);
 check("offer decode claim_key", d.claimKey.toBase58(), o.claim_key);
-check("offer decode amounts", `${d.amountA}/${d.amountB}`, `${o.amount_a}/${o.amount_b}`);
+check("offer decode amounts", `${d.amountA}/${d.amountB}/${d.notBefore}`, `${o.amount_a}/${o.amount_b}/${o.not_before}`);
 // make instruction data
 const m = vec.make_instruction;
-check("make ix data", hex(otc.encodeArgs("make", { seed: m.seed, amount_a: m.amount_a, amount_b: m.amount_b, claim_key: P(m.claim_key), mint_b: P(m.mint_b) })), m.data_hex);
+check("make ix data", hex(otc.encodeArgs("make", { seed: m.seed, amount_a: m.amount_a, amount_b: m.amount_b, claim_key: P(m.claim_key), mint_b: P(m.mint_b), not_before: m.not_before })), m.data_hex);
 check("take ix data", hex(otc.encodeArgs("take", {})), vec.take_instruction.data_hex);
 check("cancel ix data", hex(otc.encodeArgs("cancel", {})), vec.cancel_instruction.data_hex);
 // account tables: every builder names every account the abi lists (no missing names)

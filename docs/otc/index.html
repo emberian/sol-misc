@@ -70,6 +70,8 @@
       <div><label for="amountA">amount you give</label><input id="amountA" inputmode="decimal" placeholder="888888"></div>
       <div><label for="amountB">price you receive</label><input id="amountB" inputmode="decimal" placeholder="300"></div>
     </div>
+    <label for="notBefore">no cancel before (optional)</label>
+    <input id="notBefore" type="datetime-local" placeholder="leave empty to allow cancelling any time">
     <label for="makePass">passphrase for the claimer</label>
     <input id="makePass" placeholder="five or more words; share these privately" autocomplete="off" spellcheck="false">
     <button class="ghost" id="genPass" style="margin-top:8px">generate five words</button>
@@ -147,7 +149,8 @@
     offerCache = { addr, o, decA, decB, tpA: await tokenProgramOf(o.mintA), tpB: await tokenProgramOf(o.mintB) };
     $("offerView").innerHTML = `<div>you receive</div><div>${fmt(o.amountA, decA)} of <span class="mono">${o.mintA.toBase58()}</span></div>
       <div>you pay</div><div>${fmt(o.amountB, decB)} of <span class="mono">${o.mintB.toBase58()}</span></div>
-      <div>maker</div><div class="mono">${o.maker.toBase58()}</div><div>claim key</div><div class="mono">${o.claimKey.toBase58()}</div>`;
+      <div>maker</div><div class="mono">${o.maker.toBase58()}</div><div>claim key</div><div class="mono">${o.claimKey.toBase58()}</div>
+      <div>maker can cancel</div><div>${o.notBefore > 0n ? "not before " + new Date(Number(o.notBefore) * 1000).toLocaleString() : "any time"}</div>`;
     $("offerView").hidden = false; log(""); refreshButtons();
   }
   async function claim() {
@@ -185,10 +188,11 @@
       if (amountA <= 0n || amountB <= 0n) throw new Error("amounts must be positive");
       if (pass.trim().split(/\s+/).length < 4) throw new Error("use at least four words");
       const seed = BigInt(Date.now());
+      const nbRaw = $("notBefore").value; const notBefore = nbRaw ? BigInt(Math.floor(new Date(nbRaw).getTime() / 1000)) : 0n;
       const [offer] = otc.offerPda(wallet, seed);
       log("deriving claim key…");
       const kp = await otc.deriveClaimKeypair(pass, offer);
-      const { ix } = otc.ixMake({ maker: wallet, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: new PublicKey(kp.publicKey) });
+      const { ix } = otc.ixMake({ maker: wallet, seed, mintA, tokenProgramA: tpA, mintB, amountA, amountB, claimKey: new PublicKey(kp.publicKey), notBefore });
       const sig = await signAndSend([otc.ixCreateAtaIdempotent(wallet, offer, mintA, tpA), ix]);
       log(`offer created.\noffer address: <span class="mono ok">${offer.toBase58()}</span>\nshare the passphrase privately with the claimer, and this link:\n<span class="mono">${location.origin}${location.pathname}?offer=${offer.toBase58()}</span>\n<a class="ok" href="https://solscan.io/tx/${sig}">${sig.slice(0, 16)}…</a>`, "ok");
     } catch (e) { log("failed: " + (e.message || e), "bad"); }

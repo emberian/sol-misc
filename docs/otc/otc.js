@@ -54,7 +54,7 @@
     function readOffer(data) {
       if (data.length !== abi.offer.len || data[0] !== abi.offer.version) throw new Error("not an offer account");
       const o = decodeFields(abi.offer.fields, data);
-      return { version: o.version, bump: o.bump, seed: o.seed, maker: o.maker, claimKey: o.claim_key, mintA: o.mint_a, mintB: o.mint_b, amountA: o.amount_a, amountB: o.amount_b };
+      return { version: o.version, bump: o.bump, seed: o.seed, maker: o.maker, claimKey: o.claim_key, mintA: o.mint_a, mintB: o.mint_b, amountA: o.amount_a, amountB: o.amount_b, notBefore: o.not_before };
     }
 
     // ---- derivations
@@ -93,9 +93,9 @@
         { pubkey: owner, isSigner: false, isWritable: false }, { pubkey: mint, isSigner: false, isWritable: false },
         { pubkey: P.system, isSigner: false, isWritable: false }, { pubkey: tokenProgram, isSigner: false, isWritable: false } ] });
     }
-    function ixMake({ maker, seed, mintA, tokenProgramA, mintB, amountA, amountB, claimKey }) {
+    function ixMake({ maker, seed, mintA, tokenProgramA, mintB, amountA, amountB, claimKey, notBefore = 0n }) {
       const [offer] = offerPda(maker, seed);
-      const data = encodeArgs("make", { seed, amount_a: amountA, amount_b: amountB, claim_key: claimKey, mint_b: mintB });
+      const data = encodeArgs("make", { seed, amount_a: amountA, amount_b: amountB, claim_key: claimKey, mint_b: mintB, not_before: notBefore });
       const ix = buildIx("make", data, { maker, offer, mint_a: mintA, maker_ata_a: ata(maker, mintA, tokenProgramA), vault: ata(offer, mintA, tokenProgramA), token_program_a: tokenProgramA, system_program: P.system });
       return { offer, ix };
     }

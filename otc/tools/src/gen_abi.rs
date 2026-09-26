@@ -44,17 +44,18 @@ fn main() {
     );
 
     // Golden vectors from the verified encoders. Deterministic, recognisable bytes.
-    let key = |b: u8| -> Vec<u8> { (0u8..32).map(|i| b.wrapping_add(i)).collect() };
-    let offer = core::Offer { bump: 253, seed: 0x0102030405060708, maker: key(0x10), claim_key: key(0x30), mint_a: key(0x50), mint_b: key(0x70), amount_a: 888_888_000_000, amount_b: 300_000_000 };
+    let key = |b: u8| -> [u8; 32] { let mut k = [0u8; 32]; for i in 0..32 { k[i] = b.wrapping_add(i as u8); } k };
+    let (k_maker, k_claim, k_mint_a, k_mint_b) = (key(0x10), key(0x30), key(0x50), key(0x70));
+    let offer = core::Offer { bump: 253, seed: 0x0102030405060708, maker: &k_maker, claim_key: &k_claim, mint_a: &k_mint_a, mint_b: &k_mint_b, amount_a: 888_888_000_000, amount_b: 300_000_000, not_before: 1_790_000_000 };
     let offer_bytes = core::encode_offer(&offer);
     assert!(core::decode_offer(&offer_bytes).is_some(), "golden offer must decode");
-    let args = core::MakeArgs { seed: 0x0102030405060708, amount_a: 888_888_000_000, amount_b: 300_000_000, claim_key: key(0x30), mint_b: key(0x70) };
+    let args = core::MakeArgs { seed: 0x0102030405060708, amount_a: 888_888_000_000, amount_b: 300_000_000, claim_key: &k_claim, mint_b: &k_mint_b, not_before: 1_790_000_000 };
     let make_ix = core::encode_make_args(&args);
     assert!(matches!(core::parse_instruction(&make_ix), Some(core::Instruction::Make(_))));
     let vectors_json = format!(
-        "{{\n  \"offer\": {{\"bump\": {b}, \"seed\": \"{s}\", \"maker\": \"{mk}\", \"claim_key\": \"{ck}\", \"mint_a\": \"{ma}\", \"mint_b\": \"{mb}\", \"amount_a\": \"{aa}\", \"amount_b\": \"{ab}\", \"bytes_hex\": \"{ob}\"}},\n  \"make_instruction\": {{\"seed\": \"{s}\", \"amount_a\": \"{aa}\", \"amount_b\": \"{ab}\", \"claim_key\": \"{ck}\", \"mint_b\": \"{mb}\", \"data_hex\": \"{mi}\"}},\n  \"take_instruction\": {{\"data_hex\": \"{tt:02x}\"}},\n  \"cancel_instruction\": {{\"data_hex\": \"{tc:02x}\"}}\n}}\n",
-        b = offer.bump, s = offer.seed, mk = base58(&offer.maker), ck = base58(&offer.claim_key), ma = base58(&offer.mint_a), mb = base58(&offer.mint_b),
-        aa = offer.amount_a, ab = offer.amount_b, ob = hex(&offer_bytes), mi = hex(&make_ix), tt = core::TAG_TAKE, tc = core::TAG_CANCEL,
+        "{{\n  \"offer\": {{\"bump\": {b}, \"seed\": \"{s}\", \"maker\": \"{mk}\", \"claim_key\": \"{ck}\", \"mint_a\": \"{ma}\", \"mint_b\": \"{mb}\", \"amount_a\": \"{aa}\", \"amount_b\": \"{ab}\", \"not_before\": \"{nb}\", \"bytes_hex\": \"{ob}\"}},\n  \"make_instruction\": {{\"seed\": \"{s}\", \"amount_a\": \"{aa}\", \"amount_b\": \"{ab}\", \"claim_key\": \"{ck}\", \"mint_b\": \"{mb}\", \"not_before\": \"{nb}\", \"data_hex\": \"{mi}\"}},\n  \"take_instruction\": {{\"data_hex\": \"{tt:02x}\"}},\n  \"cancel_instruction\": {{\"data_hex\": \"{tc:02x}\"}}\n}}\n",
+        b = offer.bump, s = offer.seed, mk = base58(offer.maker), ck = base58(offer.claim_key), ma = base58(offer.mint_a), mb = base58(offer.mint_b),
+        aa = offer.amount_a, ab = offer.amount_b, nb = offer.not_before, ob = hex(&offer_bytes), mi = hex(&make_ix), tt = core::TAG_TAKE, tc = core::TAG_CANCEL,
     );
 
     for out in outs {

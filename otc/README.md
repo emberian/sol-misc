@@ -12,15 +12,16 @@ adapter executes.
 - **Take**: whoever can sign with the claim key pays `amount_b` from their own wallet to the
   maker's token account and receives the vault, atomically. The passphrase never touches the
   chain, so a claim can't be sniped from the mempool.
-- **Cancel**: the maker reclaims any time before a take.
+- **Cancel**: the maker reclaims any time before a take, unless the offer carries `not_before`, a unix
+  time before which cancel is refused (so an offer can be made credible during a negotiation).
 
 Mint A and mint B may live under different token programs (Token / Token-2022).
 
 ## Layout and assurance
 
 ```
-core/      dregg-otc-core   the pure part, verified with Verus (32 items, 0 errors)
-program/   dregg-otc        the SBF adapter: gathers facts, calls core, executes the plan
+core/      dregg-otc-core   the pure part, verified with Verus (33 items, 0 errors); no_std, no allocator, no Vec
+program/   dregg-otc        the SBF adapter on pinocchio (no allocator): gathers facts, calls core, executes the plan
 tools/     gen-abi          writes abi.json + vectors.json from core; nothing is hand-copied
 web/       otc.js           client core driven by abi.json (Node and browser)
 scripts/   localtest.mjs    end-to-end against solana-test-validator
@@ -40,12 +41,12 @@ scripts/   localtest.mjs    end-to-end against solana-test-validator
   the mints match the offer, every token account is the expected associated account with the
   expected mint and owner, and the two transfers are exactly `amount_b` from payer to maker and
   `amount_a` from vault to payer with the offer PDA as authority. `cancel` likewise requires the
-  maker's signature and refunds exactly `amount_a` to the maker. `make` requires the maker's
+  maker's signature and `now >= not_before`, and refunds exactly `amount_a` to the maker. `make` requires the maker's
   signature, an empty offer account at the derived PDA, positive amounts, and writes exactly
   `Offer::bytes` of the offer it funds.
 
-**What stays trusted** (the adapter, ~250 lines): deriving the PDA and associated-token addresses
-with `solana_program`, reading account fields, and issuing the CPIs the plan names. The adapter
+**What stays trusted** (the adapter, ~230 lines): deriving the PDA and associated-token addresses
+with the runtime syscalls, copying account fields into stack buffers, and issuing the CPIs the plan names. The adapter
 executes plans by looking accounts up *by key*, so it cannot pick a different account than the
 plan says.
 
@@ -57,9 +58,9 @@ verified encoders'.
 ## Build, verify, test
 
 ```sh
-~/tools/verus/verus-arm64-macos/verus core/src/lib.rs --crate-type lib   # 32 verified, 0 errors
+~/tools/verus/verus-arm64-macos/verus core/src/lib.rs --crate-type lib   # 33 verified, 0 errors
 cargo run -p dregg-otc-tools --bin gen-abi -- web ../docs/otc            # abi.json, vectors.json
-(cd program && cargo build-sbf)                                          # target/deploy/dregg_otc.so
+(cd program && cargo build-sbf)                                          # target/deploy/dregg_otc.so, 46.7 KB, rent 0.326 SOL
 node scripts/vectors-test.mjs
 # local validator: see scripts/localtest.mjs and scripts/pagetest.mjs headers
 ```

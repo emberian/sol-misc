@@ -89,4 +89,18 @@ const [offer2] = otc.offerPda(maker.publicKey, seed2);
   assert(BigInt(await bal(maker.publicKey, mintA, tpA)) === before + 1_000_000n, "maker refunded");
   console.log("cancel: ok, maker refunded");
 }
+// ---- offer 3: not_before in the future: cancel refused, take allowed
+{
+  const seed3 = 3n; const [offer3] = otc.offerPda(maker.publicKey, seed3);
+  const claim3 = await otc.deriveClaimKeypair("third phrase here", offer3);
+  const { ix } = otc.ixMake({ maker: maker.publicKey, seed: seed3, mintA, tokenProgramA: tpA, mintB, amountA: 2_000_000n, amountB: 1_000_000n, claimKey: new web3.PublicKey(claim3.publicKey), notBefore: 4_102_444_800n });
+  await send([otc.ixCreateAtaIdempotent(maker.publicKey, offer3, mintA, tpA), ix], [maker]);
+  let failed = false;
+  try { await send([otc.ixCancel({ maker: maker.publicKey, offer: offer3, mintA, tokenProgramA: tpA })], [maker]); } catch { failed = true; }
+  assert(failed, "cancel before not_before must be refused");
+  const claimKp = web3.Keypair.fromSecretKey(claim3.secretKey);
+  await send([otc.ixTake({ claimKey: claimKp.publicKey, payer: payer.publicKey, maker: maker.publicKey, offer: offer3, mintA, mintB, tokenProgramA: tpA, tokenProgramB: tpB })], [payer, claimKp]);
+  assert((await conn.getAccountInfo(offer3)) === null, "offer3 taken despite not_before");
+  console.log("not_before: cancel refused, take allowed");
+}
 console.log("ALL GREEN");
