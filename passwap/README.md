@@ -37,7 +37,7 @@ scripts/   localtest.mjs    end-to-end against solana-test-validator: happy path
 ../docs/passwap/index.html    claim / make / cancel (GitHub Pages)
 ../docs/passwap/protocol.html the user-facing protocol documentation; layouts and constants rendered live from abi.json
 ../docs/passwap/deploy.html   deploy / upgrade / close from a browser wallet (loader v3, writes signed in one prompt)
-../docs/passwap/passwap.so    the binary the deploy page offers by default; CI prints its sha256
+../docs/passwap/passwap.so    the binary the deploy page offers by default: the CI-built artifact, so its sha256 matches a public CI log
 ```
 
 **What the core proves** (`core/src/lib.rs`; the readable version is [PROPERTIES.md](PROPERTIES.md)):
@@ -77,6 +77,8 @@ node scripts/vectors-test.mjs
 # local validator: see scripts/localtest.mjs, pagetest.mjs, deploytest.mjs headers
 # CI (.github/workflows/passwap.yml) verifies, builds, checks the generated ABI is committed, prints the .so hash, and runs vectors + localtest
 ```
+
+After a source change, take `passwap.so` from the artifact of a green CI run and commit it as `docs/passwap/passwap.so` (CI warns when the committed binary is not its own build; local builds differ by toolchain).
 
 Deploy from the browser at `docs/passwap/deploy.html`: your wallet pays the rent (refundable) and
 holds the upgrade authority; the same page upgrades and closes. Paste the program keypair to keep a

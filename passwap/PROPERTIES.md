@@ -116,7 +116,7 @@ coincide, and conservation follows: the deltas of each transfer sum to zero.
   the record. The deploy page lists open offers and asks before closing.
 - **Upgrade authority** can replace the program, which can break the flow but cannot move a vault:
   P12 is a property of the custody structure, not of this version of the code. An authority of
-  none makes the program immutable and parks its rent (0.33 SOL for this binary) permanently.
+  none makes the program immutable and parks its rent (0.38 SOL for this binary) permanently.
 - **The fee recipient** is a compiled-in constant (`FEE_RECIPIENT`). Changing it is a new build.
 
 ## Negative tests

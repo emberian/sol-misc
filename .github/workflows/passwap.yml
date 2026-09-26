@@ -63,7 +63,8 @@ jobs:
       - name: binary hash
         run: |
           sha256sum target/deploy/passwap.so | tee sha256.txt
-          echo "docs copy:" && sha256sum ../docs/passwap/passwap.so
+          echo "committed docs/passwap/passwap.so:" && sha256sum ../docs/passwap/passwap.so
+          if cmp -s target/deploy/passwap.so ../docs/passwap/passwap.so; then echo "MATCH: the committed binary is this CI build"; else echo "::warning::MISMATCH: docs/passwap/passwap.so is not this CI build. After a source change, download the passwap.so artifact of a green run and commit it, so the deployed hash matches a public log."; fi
       - uses: actions/upload-artifact@v4
         with:
           name: passwap.so
