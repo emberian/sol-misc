@@ -6,3 +6,12 @@ members = ["core", "program", "tools"]
 vstd = { git = "https://github.com/verus-lang/verus", rev = "aef82ed", default-features = false, features = ["alloc"] }
 verus_builtin_macros = { git = "https://github.com/verus-lang/verus", rev = "aef82ed" }
 verus_builtin = { git = "https://github.com/verus-lang/verus", rev = "aef82ed" }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = true
+debug = false

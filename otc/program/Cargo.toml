@@ -19,8 +19,4 @@ custom-panic = []
 dregg-otc-core = { path = "../core" }
 solana-program = { version = "=3.0.0", default-features = false }
 
-[profile.release]
-overflow-checks = true
-lto = "fat"
-codegen-units = 1
-opt-level = 3
+
